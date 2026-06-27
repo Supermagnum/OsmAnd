@@ -157,9 +157,9 @@ For trucks, a **USB-CAN** adapter at **500000 bps** can decode **PGN 0xF003** (e
 
 Support for **MegaSquirt** (MS1, MS2, MS3, MS3-Pro, MicroSquirt) is **planned** but **not yet available** in this OsmAnd release. When implemented, it will read injector pulse width and RPM over serial (115200 8N1) similar to the Navit reference backend.
 
-### Adaptive fuel learning {#adaptive-fuel-learning}
+### Adaptive fuel learner {#adaptive-fuel-learning}
 
-With **Adaptive fuel learning** enabled, the plugin records fuel and distance samples in SQLite and maintains a learned **litres per kilometre** rate using an exponential moving average. This refines estimates when no live ECU is connected. Disable the toggle to stop recording new samples.
+With **Adaptive fuel learner** enabled on the General settings tab, the plugin records fuel and distance samples in SQLite and maintains a learned **litres per kilometre** rate using an exponential moving average. This refines estimates when no live ECU is connected. Turn the toggle off to stop recording new samples.
 
 For PID tables and protocol detail, see [Driver Break ECU protocols](../../technical/build-osmand/driver-break-ecu-protocols.md).
 
@@ -181,7 +181,7 @@ Open *Menu → Plugins → Driver Break → Settings*.
 | **Travel mode** | Selects Car, Truck, Hiking, Cycling, or Motorcycle. |
 | **Energy-aware routing** | After route calculation, compare variants and suggest lower-energy alternatives when thresholds are met. |
 | **Use ECU fuel data** | Use live OBD-II or J1939 fuel rate and level when connected (requires Vehicle Metrics for OBD-II). |
-| **Adaptive fuel learning** | Record fuel/distance samples and maintain a learned consumption rate (litres per km). |
+| **Adaptive fuel learner** | Enable adaptive fuel learning: record fuel/distance samples and maintain a learned consumption rate (litres per km). Off by default. |
 
 ### Intervals {#settings-intervals}
 
@@ -195,13 +195,19 @@ Open *Menu → Plugins → Driver Break → Settings*.
 | **Truck break duration (minutes)** | Mandatory break length (default 45). |
 | **Truck max daily driving (hours)** | Daily driving cap (default 9). |
 | **Hiking main stage (km)** | Main rest interval distance (default 11.295 km). |
+| **Hiking alternative rests** | Toggle shorter alternative-stage rests (default 2.275 km). |
+| **Hiking alternative stage (km)** | Alternative rest interval when enabled. |
+| **Hiking max daily distance (km)** | Suggested daily maximum (default 40 km). |
 | **Cycling main stage (km)** | Main rest interval distance (default 28.24 km). |
+| **Cycling alternative rests** | Toggle shorter alternative-stage rests (default 5.69 km). |
+| **Cycling alternative stage (km)** | Alternative rest interval when enabled. |
+| **Cycling max daily distance (km)** | Suggested daily maximum (default 100 km). |
 | **Motorcycle soft limit (minutes)** | Soft riding limit (default 120). |
 | **Motorcycle mandatory break (minutes)** | Mandatory break after this riding time (default 210). |
+| **Motorcycle break duration (minutes)** | Suggested break length (default 20). |
+| **Motorcycle max daily riding (hours)** | Suggested maximum riding time per day (default 8). |
 
-:::note
-Hiking and cycling also support **alternative stage** distances (defaults 2.275 km and 5.69 km) and **daily maximum** distances (defaults 40 km and 100 km) in the plugin database; the Intervals tab in this release exposes the main stage values. Motorcycle **break duration** defaults to 20 minutes in the database (within the documented 15–30 minute range).
-:::
+Rest stops along a calculated route appear as Driver Break markers on the map when **Travel mode** is set to hiking, cycling, or another supported mode.
 
 ### Overnight {#settings-overnight}
 

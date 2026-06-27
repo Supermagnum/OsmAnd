@@ -21,10 +21,12 @@ import android.os.AsyncTask;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import net.osmand.Location;
 import net.osmand.PlatformUtil;
 import net.osmand.data.Amenity;
 import net.osmand.data.LatLon;
 import net.osmand.data.QuadRect;
+import net.osmand.osm.PoiCategory;
 import net.osmand.plus.OsmAndTaskManager;
 import net.osmand.plus.OsmandApplication;
 import net.osmand.plus.poi.PoiUIFilter;
@@ -38,8 +40,10 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -56,8 +60,11 @@ public class PoiDiscovery {
 
 	private static final long OVERPASS_CACHE_MS = 10L * 60L * 1000L;
 
-	/** Minimum map POI hits before skipping Overpass; driver_break_poi.c threshold. */
+	/** Minimum map POI hits before skipping Overpass for a single-point lookup. */
 	private static final int MIN_MAP_POIS_BEFORE_OVERPASS = 2;
+
+	/** Max Overpass queries when the offline map index is empty. */
+	private static final int MAX_OVERPASS_ROUTE_SAMPLES = 3;
 
 	private static final String[] DNT_NETWORK_MARKERS = {
 			"dnt", "stf", "dav", "sac", "oeav", "metsähallitus", "den norske turistforening",
@@ -68,9 +75,37 @@ public class PoiDiscovery {
 	private final DriverBreakSettings settings;
 	private final ExecutorService downloadExecutor;
 	private final Map<String, CachedOverpassResult> overpassCache = new HashMap<>();
+	private final EnumMap<TravelMode, List<PoiUIFilter>> mapFilterCache = new EnumMap<>(TravelMode.class);
 
 	public interface PoiResultListener {
 		void onResult(@NonNull List<RestStop.NearbyPoi> pois);
+	}
+
+	/** POIs collected once along the route, then matched to each rest stop by distance. */
+	static final class RoutePoiIndex {
+		private final List<RestStop.NearbyPoi> pois;
+
+		RoutePoiIndex(@NonNull List<RestStop.NearbyPoi> pois) {
+			this.pois = pois;
+		}
+
+		boolean isEmpty() {
+			return pois.isEmpty();
+		}
+
+		@NonNull
+		List<RestStop.NearbyPoi> withinRadius(double lat, double lon, int radiusM, boolean dntPriority) {
+			List<RestStop.NearbyPoi> hits = new ArrayList<>();
+			for (RestStop.NearbyPoi poi : pois) {
+				double dist = MapUtils.getDistance(lat, lon, poi.getLocation().getLatitude(),
+						poi.getLocation().getLongitude());
+				if (dist <= radiusM) {
+					hits.add(new RestStop.NearbyPoi(poi.getLocation(), poi.getName(), poi.getCategory(), dist,
+							poi.isNetworkPriority()));
+				}
+			}
+			return sortPois(hits, lat, lon, dntPriority);
+		}
 	}
 
 	public PoiDiscovery(@NonNull OsmandApplication app, @NonNull DriverBreakSettings settings) {
@@ -90,25 +125,7 @@ public class PoiDiscovery {
 		OsmAndTaskManager.executeTask(new AsyncTask<Void, Void, List<RestStop.NearbyPoi>>() {
 			@Override
 			protected List<RestStop.NearbyPoi> doInBackground(Void... voids) {
-				int minBuildingsM = settings.getMinDistBuildingsM();
-				int minGlaciersM = settings.getMinDistGlaciersM();
-				if (!PoiLocationValidator.isFarEnoughFromBuildings(lat, lon, minBuildingsM)) {
-					LOG.debug("DriverBreak: POI search skipped — too close to buildings");
-					return Collections.emptyList();
-				}
-				if (!PoiLocationValidator.isFarEnoughFromGlaciers(lat, lon, minGlaciersM, false)) {
-					LOG.debug("DriverBreak: POI search skipped — too close to glacier");
-					return Collections.emptyList();
-				}
-				List<RestStop.NearbyPoi> mapResults = searchMap(lat, lon, mode);
-				List<RestStop.NearbyPoi> merged;
-				if (mapResults.size() >= MIN_MAP_POIS_BEFORE_OVERPASS) {
-					merged = mapResults;
-				} else {
-					List<RestStop.NearbyPoi> overpass = searchOverpass(lat, lon, mode);
-					merged = mergeDistinct(mapResults, overpass);
-				}
-				return sortPois(merged, lat, lon, settings.isDntPrioritySync());
+				return findNearbySync(lat, lon, mode);
 			}
 
 			@Override
@@ -118,16 +135,92 @@ public class PoiDiscovery {
 		}, downloadExecutor);
 	}
 
+	/**
+	 * Build a route-wide POI index from offline map data (one path search instead of per-stop queries).
+	 */
+	@NonNull
+	RoutePoiIndex buildRouteIndex(@NonNull List<Location> routeLocations, @NonNull TravelMode mode) {
+		long startedMs = System.currentTimeMillis();
+		if (routeLocations.isEmpty()) {
+			return new RoutePoiIndex(Collections.emptyList());
+		}
+		int radiusM = radiusForMode(mode);
+		List<Location> path = sampleRouteLocations(routeLocations, Math.max(500, radiusM / 2));
+		List<PoiUIFilter> filters = resolveMapFilters(mode);
+		if (filters.isEmpty()) {
+			LOG.warn("DriverBreak: no map POI filters resolved for mode " + mode.getConfigKey());
+			return new RoutePoiIndex(Collections.emptyList());
+		}
+		PoiUIFilter searchFilter = filters.size() == 1
+				? filters.get(0)
+				: new PoiUIFilter(new HashSet<>(filters), app);
+		List<Amenity> amenities;
+		try {
+			amenities = searchFilter.searchAmenitiesOnThePath(path, radiusM);
+		} catch (RuntimeException e) {
+			LOG.warn("DriverBreak: route POI search failed: " + e.getMessage());
+			amenities = Collections.emptyList();
+		}
+		List<RestStop.NearbyPoi> pois = amenitiesToNearbyPois(amenities, mode, null, radiusM);
+		if (pois.isEmpty()) {
+			pois = searchOverpassAlongRoute(path, mode);
+		}
+		LOG.info("DriverBreak: route POI index " + pois.size() + " POIs, "
+				+ path.size() + " path samples, " + filters.size() + " filters, "
+				+ (System.currentTimeMillis() - startedMs) + " ms");
+		return new RoutePoiIndex(pois);
+	}
+
+	/**
+	 * POIs near a rest stop using a pre-built route index.
+	 */
+	@NonNull
+	List<RestStop.NearbyPoi> poisForStop(@NonNull RoutePoiIndex index, double lat, double lon,
+			@NonNull TravelMode mode) {
+		return index.withinRadius(lat, lon, radiusForMode(mode), settings.isDntPrioritySync());
+	}
+
+	/**
+	 * Synchronous POI lookup for a single coordinate. Call from a background thread only.
+	 */
+	@NonNull
+	List<RestStop.NearbyPoi> findNearbySync(double lat, double lon, @NonNull TravelMode mode) {
+		if (!isValidSearchLocation(lat, lon)) {
+			return Collections.emptyList();
+		}
+		List<RestStop.NearbyPoi> mapResults = searchMap(lat, lon, mode);
+		List<RestStop.NearbyPoi> merged;
+		if (mapResults.size() >= MIN_MAP_POIS_BEFORE_OVERPASS) {
+			merged = mapResults;
+		} else {
+			List<RestStop.NearbyPoi> overpass = searchOverpass(lat, lon, mode);
+			merged = mergeDistinct(mapResults, overpass);
+		}
+		return sortPois(merged, lat, lon, settings.isDntPrioritySync());
+	}
+
+	private boolean isValidSearchLocation(double lat, double lon) {
+		int minBuildingsM = settings.getMinDistBuildingsM();
+		int minGlaciersM = settings.getMinDistGlaciersM();
+		if (!PoiLocationValidator.isFarEnoughFromBuildings(lat, lon, minBuildingsM)) {
+			LOG.debug("DriverBreak: POI search skipped — too close to buildings");
+			return false;
+		}
+		if (!PoiLocationValidator.isFarEnoughFromGlaciers(lat, lon, minGlaciersM, false)) {
+			LOG.debug("DriverBreak: POI search skipped — too close to glacier");
+			return false;
+		}
+		return true;
+	}
+
 	@NonNull
 	private List<RestStop.NearbyPoi> searchMap(double lat, double lon, @NonNull TravelMode mode) {
 		int radiusM = radiusForMode(mode);
 		QuadRect rect = MapUtils.calculateLatLonBbox(lat, lon, radiusM);
+		List<PoiUIFilter> filters = resolveMapFilters(mode);
 		List<RestStop.NearbyPoi> results = new ArrayList<>();
 		Set<Long> seenIds = new HashSet<>();
-		for (PoiUIFilter filter : app.getPoiFilters().getTopDefinedPoiFilters()) {
-			if (!matchesModeFilter(filter, mode)) {
-				continue;
-			}
+		for (PoiUIFilter filter : filters) {
 			List<Amenity> amenities;
 			try {
 				amenities = filter.searchAmenities(rect.top, rect.left, rect.bottom, rect.right, -1, null, true);
@@ -138,25 +231,78 @@ public class PoiDiscovery {
 			if (amenities == null) {
 				continue;
 			}
-			for (Amenity amenity : amenities) {
-				if (!matchesAmenityTags(amenity, mode)) {
-					continue;
-				}
-				long id = amenity.getId();
-				if (!seenIds.add(id)) {
-					continue;
-				}
-				double dist = MapUtils.getDistance(lat, lon, amenity.getLocation().getLatitude(),
-						amenity.getLocation().getLongitude());
-				if (dist > radiusM) {
-					continue;
-				}
-				boolean networkPriority = isNetworkPriorityPoi(amenity);
-				results.add(new RestStop.NearbyPoi(amenity.getLocation(), amenity.getName(),
-						amenity.getSubType(), dist, networkPriority));
-			}
+			results.addAll(amenitiesToNearbyPois(amenities, mode, new LatLon(lat, lon), radiusM, seenIds));
 		}
 		return results;
+	}
+
+	@NonNull
+	private List<PoiUIFilter> resolveMapFilters(@NonNull TravelMode mode) {
+		List<PoiUIFilter> cached = mapFilterCache.get(mode);
+		if (cached != null) {
+			return cached;
+		}
+		List<PoiUIFilter> resolved = new ArrayList<>();
+		for (PoiUIFilter filter : app.getPoiFilters().getTopDefinedPoiFilters()) {
+			if (isRelevantMapFilter(filter, mode)) {
+				resolved.add(filter);
+			}
+		}
+		mapFilterCache.put(mode, resolved);
+		return resolved;
+	}
+
+	@NonNull
+	private List<RestStop.NearbyPoi> amenitiesToNearbyPois(@NonNull List<Amenity> amenities,
+			@NonNull TravelMode mode, @Nullable LatLon from, int radiusM) {
+		return amenitiesToNearbyPois(amenities, mode, from, radiusM, new HashSet<>());
+	}
+
+	@NonNull
+	private List<RestStop.NearbyPoi> amenitiesToNearbyPois(@NonNull List<Amenity> amenities,
+			@NonNull TravelMode mode, @Nullable LatLon from, int radiusM, @NonNull Set<Long> seenIds) {
+		List<RestStop.NearbyPoi> results = new ArrayList<>();
+		for (Amenity amenity : amenities) {
+			if (!matchesAmenityTags(amenity, mode)) {
+				continue;
+			}
+			long id = amenity.getId();
+			if (!seenIds.add(id)) {
+				continue;
+			}
+			LatLon location = amenity.getLocation();
+			double dist = from != null
+					? MapUtils.getDistance(from.getLatitude(), from.getLongitude(),
+					location.getLatitude(), location.getLongitude())
+					: 0.0;
+			if (from != null && dist > radiusM) {
+				continue;
+			}
+			boolean networkPriority = isNetworkPriorityPoi(amenity);
+			results.add(new RestStop.NearbyPoi(location, amenity.getName(), amenity.getSubType(), dist,
+					networkPriority));
+		}
+		return results;
+	}
+
+	@NonNull
+	private List<RestStop.NearbyPoi> searchOverpassAlongRoute(@NonNull List<Location> path,
+			@NonNull TravelMode mode) {
+		if (path.isEmpty()) {
+			return Collections.emptyList();
+		}
+		List<RestStop.NearbyPoi> merged = new ArrayList<>();
+		Set<String> keys = new HashSet<>();
+		for (int index : overpassSampleIndices(path.size(), MAX_OVERPASS_ROUTE_SAMPLES)) {
+			Location location = path.get(index);
+			List<RestStop.NearbyPoi> batch = searchOverpass(location.getLatitude(), location.getLongitude(), mode);
+			for (RestStop.NearbyPoi poi : batch) {
+				if (keys.add(poiKey(poi))) {
+					merged.add(poi);
+				}
+			}
+		}
+		return merged;
 	}
 
 	@NonNull
@@ -274,41 +420,79 @@ public class PoiDiscovery {
 		return "overpass";
 	}
 
-	private int radiusForMode(@NonNull TravelMode mode) {
-		switch (mode) {
-			case HIKING:
-				if (settings.isWaterPoisEnabledSync()) {
-					return settings.getWaterRadiusM();
+	@NonNull
+	static List<Location> sampleRouteLocations(@NonNull List<Location> routeLocations, double intervalM) {
+		if (routeLocations.size() <= 2 || intervalM <= 0) {
+			return new ArrayList<>(routeLocations);
+		}
+		List<Location> sampled = new ArrayList<>();
+		sampled.add(routeLocations.get(0));
+		double sinceLastM = 0.0;
+		for (int i = 1; i < routeLocations.size(); i++) {
+			Location previous = routeLocations.get(i - 1);
+			Location current = routeLocations.get(i);
+			sinceLastM += MapUtils.getDistance(previous.getLatitude(), previous.getLongitude(),
+					current.getLatitude(), current.getLongitude());
+			if (sinceLastM >= intervalM) {
+				sampled.add(current);
+				sinceLastM = 0.0;
+			}
+		}
+		Location last = routeLocations.get(routeLocations.size() - 1);
+		Location tail = sampled.get(sampled.size() - 1);
+		if (tail.getLatitude() != last.getLatitude() || tail.getLongitude() != last.getLongitude()) {
+			sampled.add(last);
+		}
+		return sampled;
+	}
+
+	@NonNull
+	static int[] overpassSampleIndices(int pathSize, int maxSamples) {
+		if (pathSize <= 0) {
+			return new int[0];
+		}
+		if (pathSize == 1 || maxSamples <= 1) {
+			return new int[] {0};
+		}
+		int samples = Math.min(maxSamples, pathSize);
+		int[] indices = new int[samples];
+		for (int i = 0; i < samples; i++) {
+			indices[i] = (int) Math.round((double) i * (pathSize - 1) / (samples - 1));
+		}
+		return indices;
+	}
+
+	static boolean isRelevantMapFilter(@NonNull PoiUIFilter filter, @NonNull TravelMode mode) {
+		if (filter.isRoutesFilter() || filter.isWikiFilter()
+				|| filter.isRouteArticleFilter() || filter.isRouteArticlePointFilter()) {
+			return false;
+		}
+		String filterId = filter.getFilterId().toLowerCase(Locale.US);
+		if (filterId.contains("routes_") || filterId.contains("route_article")) {
+			return false;
+		}
+		if (mode == TravelMode.HIKING && (filterId.contains("charging") || filterId.contains("bicycle"))) {
+			return false;
+		}
+		Map<PoiCategory, LinkedHashSet<String>> acceptedTypes = filter.getAcceptedTypes();
+		if (acceptedTypes == null || acceptedTypes.isEmpty()) {
+			return false;
+		}
+		for (Map.Entry<PoiCategory, LinkedHashSet<String>> entry : acceptedTypes.entrySet()) {
+			LinkedHashSet<String> subTypes = entry.getValue();
+			if (subTypes == null) {
+				continue;
+			}
+			for (String subType : subTypes) {
+				if (matchesAmenitySubType(subType, mode)) {
+					return true;
 				}
-				return settings.getCabinRadiusM();
-			case CYCLING:
-				return settings.getPoiRadiusM();
-			default:
-				return settings.getPoiRadiusM();
+			}
 		}
+		return false;
 	}
 
-	private static boolean matchesModeFilter(@NonNull PoiUIFilter filter, @NonNull TravelMode mode) {
-		String id = filter.getFilterId().toLowerCase(Locale.US);
-		switch (mode) {
-			case HIKING:
-			case CYCLING:
-				return id.contains("water") || id.contains("accommodation") || id.contains("camp")
-						|| id.contains("hut") || id.contains("hostel") || id.contains("worship")
-						|| id.contains("bicycle") || id.contains("charging");
-			case MOTORCYCLE:
-				return id.contains("fuel") || id.contains("food") || id.contains("cafe")
-						|| id.contains("viewpoint");
-			case TRUCK:
-			case CAR:
-			default:
-				return id.contains("fuel") || id.contains("food") || id.contains("cafe")
-						|| id.contains("restaurant") || id.contains("viewpoint");
-		}
-	}
-
-	private static boolean matchesAmenityTags(@NonNull Amenity amenity, @NonNull TravelMode mode) {
-		String subType = amenity.getSubType();
+	static boolean matchesAmenitySubType(@Nullable String subType, @NonNull TravelMode mode) {
 		if (subType == null) {
 			return false;
 		}
@@ -331,6 +515,24 @@ public class PoiDiscovery {
 				return "fuel".equals(subType) || "cafe".equals(subType) || "restaurant".equals(subType)
 						|| "viewpoint".equals(subType) || "museum".equals(subType);
 		}
+	}
+
+	private int radiusForMode(@NonNull TravelMode mode) {
+		switch (mode) {
+			case HIKING:
+				if (settings.isWaterPoisEnabledSync()) {
+					return settings.getWaterRadiusM();
+				}
+				return settings.getCabinRadiusM();
+			case CYCLING:
+				return settings.getPoiRadiusM();
+			default:
+				return settings.getPoiRadiusM();
+		}
+	}
+
+	private static boolean matchesAmenityTags(@NonNull Amenity amenity, @NonNull TravelMode mode) {
+		return matchesAmenitySubType(amenity.getSubType(), mode);
 	}
 
 	static boolean isNetworkPriorityPoi(@NonNull Amenity amenity) {

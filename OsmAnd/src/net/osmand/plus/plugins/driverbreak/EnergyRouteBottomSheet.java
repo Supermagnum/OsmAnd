@@ -27,11 +27,12 @@ import androidx.fragment.app.FragmentManager;
 import net.osmand.plus.R;
 import net.osmand.plus.base.MenuBottomSheetDialogFragment;
 import net.osmand.plus.base.bottomsheetmenu.BaseBottomSheetItem;
+import net.osmand.plus.plugins.PluginsHelper;
 import net.osmand.plus.settings.backend.ApplicationMode;
 import net.osmand.plus.utils.AndroidUtils;
 
 /**
- * Informs the user when a lower-energy route variant is available.
+ * Informs the user when a lower-energy route variant is available and can be applied.
  */
 public class EnergyRouteBottomSheet extends MenuBottomSheetDialogFragment {
 
@@ -39,29 +40,58 @@ public class EnergyRouteBottomSheet extends MenuBottomSheetDialogFragment {
 
 	private static final String ARG_SAVING_PERCENT = "saving_percent";
 	private static final String ARG_DISTANCE_INCREASE_PERCENT = "distance_increase_percent";
+	private static final String ARG_ALREADY_APPLIED = "already_applied";
 
 	@Override
 	public void createMenuItems(Bundle savedInstanceState) {
 		Bundle args = getArguments();
 		int savingPercent = args != null ? args.getInt(ARG_SAVING_PERCENT, 0) : 0;
 		int distanceIncreasePercent = args != null ? args.getInt(ARG_DISTANCE_INCREASE_PERCENT, 0) : 0;
+		boolean alreadyApplied = args != null && args.getBoolean(ARG_ALREADY_APPLIED, false);
 
 		View root = inflate(R.layout.bottom_sheet_icon_title_description);
 		android.widget.TextView title = root.findViewById(R.id.title);
 		android.widget.TextView description = root.findViewById(R.id.description);
 		title.setText(R.string.driver_break_energy_route_title);
-		description.setText(getString(R.string.driver_break_energy_route_message, savingPercent,
-				distanceIncreasePercent));
+		if (alreadyApplied) {
+			description.setText(getString(R.string.driver_break_energy_route_applied,
+					savingPercent, distanceIncreasePercent));
+		} else {
+			description.setText(getString(R.string.driver_break_energy_route_message, savingPercent,
+					distanceIncreasePercent));
+		}
 		items.add(new BaseBottomSheetItem.Builder().setCustomView(root).create());
 	}
 
 	@Override
+	protected int getDismissButtonTextId() {
+		Bundle args = getArguments();
+		if (args != null && args.getBoolean(ARG_ALREADY_APPLIED, false)) {
+			return DEFAULT_VALUE;
+		}
+		return R.string.shared_string_cancel;
+	}
+
+	@Override
 	protected int getRightBottomButtonTextId() {
-		return R.string.shared_string_ok;
+		Bundle args = getArguments();
+		if (args != null && args.getBoolean(ARG_ALREADY_APPLIED, false)) {
+			return R.string.shared_string_ok;
+		}
+		return R.string.driver_break_use_energy_route;
 	}
 
 	@Override
 	protected void onRightBottomButtonClick() {
+		Bundle args = getArguments();
+		if (args != null && args.getBoolean(ARG_ALREADY_APPLIED, false)) {
+			dismiss();
+			return;
+		}
+		DriverBreakPlugin plugin = PluginsHelper.getActivePlugin(DriverBreakPlugin.class);
+		if (plugin != null) {
+			plugin.applyPendingEnergyRoute();
+		}
 		dismiss();
 	}
 
@@ -70,7 +100,7 @@ public class EnergyRouteBottomSheet extends MenuBottomSheetDialogFragment {
 	 */
 	public static void showInstance(@NonNull FragmentManager fragmentManager, @Nullable Fragment target,
 			@Nullable ApplicationMode appMode, boolean usedOnMap, double energySavingFraction,
-			double distanceIncreaseFraction) {
+			double distanceIncreaseFraction, boolean alreadyApplied) {
 		if (!AndroidUtils.isFragmentCanBeAdded(fragmentManager, TAG)) {
 			return;
 		}
@@ -78,6 +108,7 @@ public class EnergyRouteBottomSheet extends MenuBottomSheetDialogFragment {
 		Bundle args = new Bundle();
 		args.putInt(ARG_SAVING_PERCENT, (int) Math.round(energySavingFraction * 100.0));
 		args.putInt(ARG_DISTANCE_INCREASE_PERCENT, (int) Math.round(distanceIncreaseFraction * 100.0));
+		args.putBoolean(ARG_ALREADY_APPLIED, alreadyApplied);
 		sheet.setArguments(args);
 		sheet.setUsedOnMap(usedOnMap);
 		sheet.setTargetFragment(target, 0);

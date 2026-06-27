@@ -47,6 +47,9 @@ public class AdaptiveFuelLearner {
 	 * @param mode        travel mode key
 	 */
 	public void recordSample(double distanceM, double fuelLitres, @NonNull TravelMode mode) {
+		if (!settings.isAdaptiveFuelEnabledSync()) {
+			return;
+		}
 		if (distanceM <= 0.0 || fuelLitres < 0.0) {
 			return;
 		}
@@ -72,6 +75,9 @@ public class AdaptiveFuelLearner {
 	 * @return learned litres per km
 	 */
 	public double recomputeFromHistory() {
+		if (!settings.isAdaptiveFuelEnabledSync()) {
+			return settings.getLearnedRateLPerKmSync();
+		}
 		double rate = 0.0;
 		for (DriverBreakDatabase.FuelSampleRow row : settings.getDatabase().getFuelSamples()) {
 			if (row.distanceM <= 0.0) {

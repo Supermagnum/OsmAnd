@@ -39,9 +39,17 @@ final class DriverBreakSettingsSnapshot {
 	final String truckBreakDurationMin;
 	final String truckMaxDailyH;
 	final String hikingMainDistKm;
+	final boolean hikingAltEnabled;
+	final String hikingAltDistKm;
+	final String hikingMaxDailyKm;
 	final String cyclingMainDistKm;
+	final boolean cyclingAltEnabled;
+	final String cyclingAltDistKm;
+	final String cyclingMaxDailyKm;
 	final String motoSoftLimitMin;
 	final String motoMandatoryBreakMin;
+	final String motoBreakDurationMin;
+	final String motoMaxDailyH;
 	final String poiRadiusM;
 	final String waterRadiusM;
 	final String cabinRadiusM;
@@ -57,8 +65,11 @@ final class DriverBreakSettingsSnapshot {
 			@NonNull String carSoftLimitH, @NonNull String carMaxLimitH, @NonNull String carBreakIntervalH,
 			@NonNull String carBreakDurationMin, @NonNull String truckMandatoryBreakH,
 			@NonNull String truckBreakDurationMin, @NonNull String truckMaxDailyH,
-			@NonNull String hikingMainDistKm, @NonNull String cyclingMainDistKm,
+			@NonNull String hikingMainDistKm, boolean hikingAltEnabled, @NonNull String hikingAltDistKm,
+			@NonNull String hikingMaxDailyKm, @NonNull String cyclingMainDistKm, boolean cyclingAltEnabled,
+			@NonNull String cyclingAltDistKm, @NonNull String cyclingMaxDailyKm,
 			@NonNull String motoSoftLimitMin, @NonNull String motoMandatoryBreakMin,
+			@NonNull String motoBreakDurationMin, @NonNull String motoMaxDailyH,
 			@NonNull String poiRadiusM, @NonNull String waterRadiusM, @NonNull String cabinRadiusM,
 			@NonNull String minDistBuildingsM, @NonNull String minDistGlaciersM,
 			@NonNull String totalWeightKg, @NonNull String dragCd, @NonNull String frontalAreaM2,
@@ -77,9 +88,17 @@ final class DriverBreakSettingsSnapshot {
 		this.truckBreakDurationMin = truckBreakDurationMin;
 		this.truckMaxDailyH = truckMaxDailyH;
 		this.hikingMainDistKm = hikingMainDistKm;
+		this.hikingAltEnabled = hikingAltEnabled;
+		this.hikingAltDistKm = hikingAltDistKm;
+		this.hikingMaxDailyKm = hikingMaxDailyKm;
 		this.cyclingMainDistKm = cyclingMainDistKm;
+		this.cyclingAltEnabled = cyclingAltEnabled;
+		this.cyclingAltDistKm = cyclingAltDistKm;
+		this.cyclingMaxDailyKm = cyclingMaxDailyKm;
 		this.motoSoftLimitMin = motoSoftLimitMin;
 		this.motoMandatoryBreakMin = motoMandatoryBreakMin;
+		this.motoBreakDurationMin = motoBreakDurationMin;
+		this.motoMaxDailyH = motoMaxDailyH;
 		this.poiRadiusM = poiRadiusM;
 		this.waterRadiusM = waterRadiusM;
 		this.cabinRadiusM = cabinRadiusM;
@@ -119,9 +138,17 @@ final class DriverBreakSettingsSnapshot {
 				String.valueOf(settings.getIntConfig("truck_break_duration_min", 45)),
 				String.valueOf(settings.getIntConfig("truck_max_daily_h", 9)),
 				String.valueOf(settings.getDoubleConfig("hiking_main_dist_km", 11.295)),
+				settings.isHikingAltEnabledSync(),
+				String.valueOf(settings.getDoubleConfig("hiking_alt_dist_km", 2.2752)),
+				String.valueOf(settings.getDoubleConfig("hiking_max_daily_km", 40.0)),
 				String.valueOf(settings.getDoubleConfig("cycling_main_dist_km", 28.24)),
+				settings.isCyclingAltEnabledSync(),
+				String.valueOf(settings.getDoubleConfig("cycling_alt_dist_km", 5.69)),
+				String.valueOf(settings.getDoubleConfig("cycling_max_daily_km", 100.0)),
 				String.valueOf(settings.getIntConfig("moto_soft_limit_min", 120)),
 				String.valueOf(settings.getIntConfig("moto_mandatory_break_min", 210)),
+				String.valueOf(settings.getIntConfig("moto_break_duration_min", 20)),
+				String.valueOf(settings.getIntConfig("moto_max_daily_h", 8)),
 				String.valueOf(settings.getPoiRadiusM()),
 				String.valueOf(settings.getWaterRadiusM()),
 				String.valueOf(settings.getCabinRadiusM()),

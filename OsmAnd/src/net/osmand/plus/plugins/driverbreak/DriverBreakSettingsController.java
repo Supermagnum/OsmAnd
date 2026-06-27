@@ -70,6 +70,12 @@ final class DriverBreakSettingsController {
 			case "driver_break_dnt_priority":
 				settings.getDbExecutor().execute(() -> settings.setDntPrioritySync(Boolean.TRUE.equals(newValue)));
 				return true;
+			case "driver_break_hiking_alt_enabled":
+				settings.getDbExecutor().execute(() -> settings.setHikingAltEnabledSync(Boolean.TRUE.equals(newValue)));
+				return true;
+			case "driver_break_cycling_alt_enabled":
+				settings.getDbExecutor().execute(() -> settings.setCyclingAltEnabledSync(Boolean.TRUE.equals(newValue)));
+				return true;
 			case "driver_break_total_weight":
 				if (!validateRange(key, parseDouble(text), MIN_TOTAL_WEIGHT_KG, MAX_TOTAL_WEIGHT_KG)) {
 					return false;

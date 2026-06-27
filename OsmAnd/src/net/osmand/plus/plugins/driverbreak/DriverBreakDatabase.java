@@ -106,13 +106,16 @@ public class DriverBreakDatabase extends SQLiteOpenHelper {
 		DEFAULT_CONFIG.put("truck_max_daily_h", "9");
 		DEFAULT_CONFIG.put("hiking_main_dist_km", "11.295");
 		DEFAULT_CONFIG.put("hiking_alt_dist_km", "2.2752");
+		DEFAULT_CONFIG.put("hiking_alt_enabled", "1");
 		DEFAULT_CONFIG.put("hiking_max_daily_km", "40.0");
 		DEFAULT_CONFIG.put("cycling_main_dist_km", "28.24");
 		DEFAULT_CONFIG.put("cycling_alt_dist_km", "5.69");
+		DEFAULT_CONFIG.put("cycling_alt_enabled", "1");
 		DEFAULT_CONFIG.put("cycling_max_daily_km", "100.0");
 		DEFAULT_CONFIG.put("moto_soft_limit_min", "120");
 		DEFAULT_CONFIG.put("moto_mandatory_break_min", "210");
 		DEFAULT_CONFIG.put("moto_break_duration_min", "20");
+		DEFAULT_CONFIG.put("moto_max_daily_h", "8");
 		DEFAULT_CONFIG.put("moto_terrain", "road");
 		DEFAULT_CONFIG.put("water_pois_enabled", "0");
 		DEFAULT_CONFIG.put("poi_radius_m", "15000");

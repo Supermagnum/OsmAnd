@@ -87,7 +87,7 @@ The first on-device attempt crashed in `AndroidJUnitRunner` with `NoClassDefFoun
 | `EnergyRouteAlternativeExtractorTest` | Attached alternative route variant extraction |
 | `SRTMElevationProviderTest` | HGT filename logic, void handling, tile directory layout |
 | `RouteValidatorTest` | Hiking/cycling forbidden-highway and priority fractions |
-| `PoiDiscoveryTest` | POI filter selection and discovery helpers |
+| `PoiDiscoveryTest` | POI filter selection, route sampling, route index radius lookup, Overpass query helpers (7 methods in source; 3 executed in captured run above) |
 | `AdaptiveFuelLearnerTest` | EMA fuel-rate learning and persistence keys |
 | `J1939BackendTest` | J1939 PGN scaling (0.05 L/h per bit, 0.4% per bit) |
 
@@ -119,6 +119,83 @@ From [test-results.rst](https://github.com/Supermagnum/navit/blob/feature/driver
 | Cycling 100 km route intervals | 3 rest intervals |
 
 Without map or HGT tiles, POI counts and elevations may be zero or void; tests still exit 0 to verify code paths.
+
+## Emulator route integration (2026-06-27) {#emulator-route-integration-2026-06-27}
+
+Manual verification on **Pixel 9 Pro AVD** (`emulator-5554`), **API 17**, flavor `gplayFreeLegacyFatDebug`, package `net.osmand`, plugin `osmand.driver.break` enabled. Maps: `Norway_innlandet_europe.obf` (+ world mini). Routes opened via deep link to `MapActivity` (`profile=pedestrian` or car profile as noted). Driver Break config pushed to `/storage/emulated/0/Android/data/net.osmand/files/driver_break/driver_break.db`.
+
+Log filter: `adb logcat -d | grep DriverBreak`
+
+### Car route — Sund to Ringebu (via Best Os)
+
+| Item | Value |
+|---|---|
+| Mode | `car` (default DB config) |
+| Result | Route ~9358 points; **1 rest stop, 1 with nearby POIs** |
+| Notes | Rest-stop map layer and POI snap verified |
+
+### Energy routing — long car route
+
+| Item | Value |
+|---|---|
+| Config | `use_energy_routing=1` |
+| Route | Same long car route as above (~9358 points) |
+| Segment sampling | Routes with more than 256 segments bucketed to 256 for SRTM lookups |
+| Analysis time | ~2 min (elevation + variant comparison) |
+| Result | `primary route energy=5.21e7 J`, `energySegments=129`, `variants=8`; auto-apply / bottom sheet wired |
+
+### Hiking route — Friisvegen to Gautåsæter via Rondvassbu
+
+| Waypoint | Coordinates |
+|---|---|
+| Start — Friisvegen, Øksendalen, Ringebu | 61.6192483, 10.3907521 |
+| Via — Rondvassbu, Sel | 61.8804325, 9.7959854 |
+| End — 84 Gautåsætervegen, Dovre | 62.1955570, 9.5470570 |
+
+**DB config:** `travel_mode=hiking`, `water_pois_enabled=1`, `dnt_priority=1`, `water_radius_m=2000`, `poi_radius_m=15000`.
+
+Launch example:
+
+```bash
+adb emu geo fix 10.3907521 61.6192483 400
+adb shell am force-stop net.osmand
+adb shell am start -S -a android.intent.action.VIEW \
+  -n net.osmand/.plus.activities.MapActivity \
+  -d "https://osmand.net/map?start=61.6192483,10.3907521&end=62.1955570,9.5470570&via=61.8804325,9.7959854&profile=pedestrian"
+```
+
+#### Before POI finder optimization
+
+| Step | Result |
+|---|---|
+| Route calculation | 4573 points in ~20 s |
+| Per-stop POI search | Did not finish within several minutes |
+| Map filters matched | Wrong filters (`std_charging_station`, `std_routes_water_sport`); 0 amenities per bbox |
+| Overpass | HTTP 400 / 429 / connection errors on building checks and POI fallback |
+| `RestStopFinder` completion log | Not observed |
+
+#### After route-wide POI index (`PoiDiscovery.buildRouteIndex`)
+
+| Step | Time / result |
+|---|---|
+| Route calculation | 4573 points in **19.4 s** |
+| Route POI index | **121 ms** — 9 POIs, 137 path samples, 4 filters; 408 corridor amenities reduced by hiking subtype filter |
+| Rest stop assignment | **~15 ms** |
+| **Total POI phase** | **~136 ms** (was many minutes) |
+| Overpass | **None** (offline map only on final run) |
+| **Rest stops** | **73 rest stops, 22 with nearby POIs** |
+
+Representative logcat:
+
+```
+RouteProvider Finding route contained 4573 points for 19442 ms
+PoiDiscovery DriverBreak: route POI index 9 POIs, 137 path samples, 4 filters, 121 ms
+RestStopFinder DriverBreak: 73 rest stops, 22 with nearby POIs
+```
+
+**Coverage notes:** POI types include drinking water, springs, and DNT-priority huts/cabins within the 2 km water radius. Lowland sections near Ringebu have fewer matches than the Rondane mountain leg (expected with sparse OSM density and a 2 km radius). Building/glacier Overpass validation is skipped when assigning POIs from the offline route index; Overpass remains a fallback only when the index is empty (max 3 sample points along the route).
+
+**Fixes applied during this test cycle:** null-safe POI filter resolution (`isRelevantMapFilter`); subtype-based filter selection (excludes route/water-sport/charging filters for hiking); route-wide `searchAmenitiesOnThePath` with combined filter; building-proximity cache and Overpass rate limiting in `PoiLocationValidator`.
 
 ### Run Navit tests locally
 

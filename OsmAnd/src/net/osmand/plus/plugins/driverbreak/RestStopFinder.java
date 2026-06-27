@@ -21,13 +21,13 @@ import android.os.AsyncTask;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import net.osmand.Location;
 import net.osmand.PlatformUtil;
 import net.osmand.data.LatLon;
 import net.osmand.plus.OsmAndTaskManager;
 import net.osmand.plus.OsmandApplication;
 import net.osmand.plus.routing.RouteCalculationResult;
 import net.osmand.router.RouteSegmentResult;
-import net.osmand.util.MapUtils;
 
 import org.apache.commons.logging.Log;
 
@@ -35,7 +35,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * Walks a calculated route and proposes rest stops at mode-specific intervals.
@@ -45,27 +44,24 @@ public class RestStopFinder {
 
 	private static final Log LOG = PlatformUtil.getLog(RestStopFinder.class);
 
+	/** Max POI references attached to each rest stop marker. */
+	static final int MAX_POIS_PER_STOP = 5;
+
 	private final OsmandApplication app;
 	private final DriverBreakSettings settings;
 	private final PoiDiscovery poiDiscovery;
-	private final SRTMElevationProvider elevationProvider;
-	private final ExecutorService restStopExecutor;
+	private final ExecutorService executor;
 
 	public interface RestStopListener {
 		void onRestStopsFound(@NonNull List<RestStop> stops);
 	}
 
 	public RestStopFinder(@NonNull OsmandApplication app, @NonNull DriverBreakSettings settings,
-			@NonNull PoiDiscovery poiDiscovery, @NonNull SRTMElevationProvider elevationProvider) {
+			@NonNull PoiDiscovery poiDiscovery, @NonNull ExecutorService executor) {
 		this.app = app;
 		this.settings = settings;
 		this.poiDiscovery = poiDiscovery;
-		this.elevationProvider = elevationProvider;
-		this.restStopExecutor = Executors.newSingleThreadExecutor(r -> {
-			Thread t = new Thread(r, "driver-break-rest-stop");
-			t.setDaemon(true);
-			return t;
-		});
+		this.executor = executor;
 	}
 
 	/**
@@ -84,61 +80,86 @@ public class RestStopFinder {
 				app.runInUIThread(() -> listener.onRestStopsFound(
 						restStops != null ? restStops : Collections.emptyList()));
 			}
-		}, restStopExecutor);
+		}, executor);
 	}
 
 	@NonNull
 	List<RestStop> computeStops(@NonNull RouteCalculationResult route, @NonNull TravelMode mode) {
 		List<RouteSegmentResult> segments = route.getOriginalRoute();
-		if (segments.isEmpty()) {
+		if (segments == null || segments.isEmpty()) {
 			return Collections.emptyList();
 		}
 		double totalDistanceM = 0.0;
 		for (RouteSegmentResult segment : segments) {
 			totalDistanceM += segment.getDistance();
 		}
-		List<Double> breakDistancesM = intervalDistancesM(mode, totalDistanceM);
+		List<Double> breakDistancesM = intervalDistancesM(mode, segments, totalDistanceM);
+		List<Location> routeLocations = route.getImmutableAllLocations();
+		PoiDiscovery.RoutePoiIndex routePois = poiDiscovery.buildRouteIndex(routeLocations, mode);
 		List<RestStop> stops = new ArrayList<>();
 		for (Double targetM : breakDistancesM) {
 			LatLon coord = coordinateAtDistance(segments, targetM);
 			if (coord == null) {
 				continue;
 			}
-			List<RestStop.NearbyPoi> pois = searchPoisSync(coord.getLatitude(), coord.getLongitude(), mode);
-			stops.add(new RestStop(coord, mode, pois, 0.0));
+			stops.add(restStopWithNearbyPois(coord, mode, routePois));
+		}
+		if (!stops.isEmpty()) {
+			int withPois = 0;
+			for (RestStop stop : stops) {
+				if (!stop.getPois().isEmpty()) {
+					withPois++;
+				}
+			}
+			LOG.info("DriverBreak: " + stops.size() + " rest stops, " + withPois + " with nearby POIs");
 		}
 		return stops;
 	}
 
 	@NonNull
-	private List<Double> intervalDistancesM(@NonNull TravelMode mode, double totalDistanceM) {
-		List<Double> targets = new ArrayList<>();
-		double intervalM;
+	private RestStop restStopWithNearbyPois(@NonNull LatLon coord, @NonNull TravelMode mode,
+			@NonNull PoiDiscovery.RoutePoiIndex routePois) {
+		List<RestStop.NearbyPoi> pois = limitPois(
+				poiDiscovery.poisForStop(routePois, coord.getLatitude(), coord.getLongitude(), mode),
+				MAX_POIS_PER_STOP);
+		double nearestPoiDistM = pois.isEmpty() ? 0.0 : pois.get(0).getDistanceM();
+		return new RestStop(coord, mode, pois, nearestPoiDistM);
+	}
+
+	@NonNull
+	static List<RestStop.NearbyPoi> limitPois(@NonNull List<RestStop.NearbyPoi> pois, int maxCount) {
+		if (pois.size() <= maxCount) {
+			return pois;
+		}
+		return new ArrayList<>(pois.subList(0, maxCount));
+	}
+
+	@NonNull
+	private List<Double> intervalDistancesM(@NonNull TravelMode mode,
+			@NonNull List<RouteSegmentResult> segments, double totalDistanceM) {
 		switch (mode) {
 			case HIKING:
-				intervalM = settings.getHikingMainDistKm() * 1000.0;
-				break;
+				return RestStopIntervalHelper.hikingOrCyclingDistancesM(totalDistanceM,
+						settings.getHikingMainDistKm(), settings.getHikingAltDistKm(),
+						settings.isHikingAltEnabledSync(), settings.getHikingMaxDailyKm());
 			case CYCLING:
-				intervalM = settings.getCyclingMainDistKm() * 1000.0;
-				break;
-			case CAR:
+				return RestStopIntervalHelper.hikingOrCyclingDistancesM(totalDistanceM,
+						settings.getCyclingMainDistKm(), settings.getCyclingAltDistKm(),
+						settings.isCyclingAltEnabledSync(), settings.getCyclingMaxDailyKm());
 			case TRUCK:
+				return RestStopIntervalHelper.drivingBreakDistancesM(segments,
+						settings.getTruckMandatoryBreakHours() * 3600.0,
+						settings.getTruckMaxDailyHours() * 3600.0);
 			case MOTORCYCLE:
+				return RestStopIntervalHelper.drivingBreakDistancesM(segments,
+						settings.getMotorcycleMandatoryBreakMinutes() * 60.0,
+						settings.getMotorcycleMaxDailyHours() * 3600.0);
+			case CAR:
 			default:
-				int hours = mode == TravelMode.TRUCK
-						? settings.getTruckMandatoryBreakHours()
-						: settings.getCarBreakIntervalHours();
-				double avgSpeedMs = 25.0;
-				intervalM = hours * 3600.0 * avgSpeedMs;
-				break;
+				return RestStopIntervalHelper.drivingBreakDistancesM(segments,
+						settings.getCarBreakIntervalHours() * 3600.0,
+						settings.getCarMaxLimitHours() * 3600.0);
 		}
-		if (intervalM <= 0.0 || totalDistanceM <= intervalM) {
-			return targets;
-		}
-		for (double d = intervalM; d < totalDistanceM; d += intervalM) {
-			targets.add(d);
-		}
-		return targets;
 	}
 
 	@Nullable
@@ -162,24 +183,4 @@ public class RestStopFinder {
 		return null;
 	}
 
-	@NonNull
-	private List<RestStop.NearbyPoi> searchPoisSync(double lat, double lon, @NonNull TravelMode mode) {
-		final List<RestStop.NearbyPoi>[] holder = new List[] {Collections.emptyList()};
-		final Object lock = new Object();
-		poiDiscovery.findNearby(lat, lon, mode, pois -> {
-			synchronized (lock) {
-				holder[0] = pois;
-				lock.notifyAll();
-			}
-		});
-		synchronized (lock) {
-			try {
-				lock.wait(5000);
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				LOG.warn("DriverBreak: POI search interrupted");
-			}
-		}
-		return holder[0];
-	}
 }

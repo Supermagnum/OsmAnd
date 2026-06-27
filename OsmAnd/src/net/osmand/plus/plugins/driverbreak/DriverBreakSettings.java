@@ -31,6 +31,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Typed accessors for Driver Break SQLite config and session state.
@@ -105,6 +109,24 @@ public class DriverBreakSettings implements BreakTimer.ThresholdProvider {
 		database.setConfig("adaptive_fuel_enabled", enabled ? "1" : "0");
 	}
 
+	/**
+	 * Learned consumption rate when {@link #isAdaptiveFuelEnabledSync()} is true; otherwise 0.
+	 */
+	public double getEffectiveLearnedRateLPerKmSync() {
+		if (!isAdaptiveFuelEnabledSync()) {
+			return 0.0;
+		}
+		return getLearnedRateLPerKmSync();
+	}
+
+	public double getLearnedRateLPerKmSync() {
+		return parseDouble(database.getConfig("adaptive_learned_lkm"), 0.0);
+	}
+
+	public void setLearnedRateLPerKmSync(double rate) {
+		database.setConfig("adaptive_learned_lkm", String.valueOf(rate));
+	}
+
 	@NonNull
 	public EnergyParams getEnergyParamsSync() {
 		double mass = clamp(parseDouble(database.getConfig("total_weight"), 80.0),
@@ -120,14 +142,6 @@ public class DriverBreakSettings implements BreakTimer.ThresholdProvider {
 		database.setConfig("energy_drag_cd", String.valueOf(clamp(dragCd, MIN_DRAG_CD, MAX_DRAG_CD)));
 		database.setConfig("energy_frontal_area_sqm",
 				String.valueOf(clamp(frontalAreaM2, MIN_FRONTAL_AREA_SQM, MAX_FRONTAL_AREA_SQM)));
-	}
-
-	public double getLearnedRateLPerKmSync() {
-		return parseDouble(database.getConfig("adaptive_learned_lkm"), 0.0);
-	}
-
-	public void setLearnedRateLPerKmSync(double rate) {
-		database.setConfig("adaptive_learned_lkm", String.valueOf(rate));
 	}
 
 	public void persistBreakTimerStateSync(long lastBreakElapsedMs, long accumulatedDistanceM, boolean breakInProgress) {
@@ -153,9 +167,17 @@ public class DriverBreakSettings implements BreakTimer.ThresholdProvider {
 		return parseInt(database.getConfig("car_break_interval_h"), 4);
 	}
 
+	public int getCarMaxLimitHours() {
+		return parseInt(database.getConfig("car_max_limit_h"), 10);
+	}
+
 	@Override
 	public int getTruckMandatoryBreakHours() {
 		return parseInt(database.getConfig("truck_mandatory_break_h"), 4);
+	}
+
+	public int getTruckMaxDailyHours() {
+		return parseInt(database.getConfig("truck_max_daily_h"), 9);
 	}
 
 	@Override
@@ -176,6 +198,46 @@ public class DriverBreakSettings implements BreakTimer.ThresholdProvider {
 	@Override
 	public double getCyclingMainDistKm() {
 		return parseDouble(database.getConfig("cycling_main_dist_km"), 28.24);
+	}
+
+	public double getHikingAltDistKm() {
+		return parseDouble(database.getConfig("hiking_alt_dist_km"), 2.2752);
+	}
+
+	public double getCyclingAltDistKm() {
+		return parseDouble(database.getConfig("cycling_alt_dist_km"), 5.69);
+	}
+
+	public double getHikingMaxDailyKm() {
+		return parseDouble(database.getConfig("hiking_max_daily_km"), 40.0);
+	}
+
+	public double getCyclingMaxDailyKm() {
+		return parseDouble(database.getConfig("cycling_max_daily_km"), 100.0);
+	}
+
+	public boolean isHikingAltEnabledSync() {
+		return "1".equals(database.getConfig("hiking_alt_enabled"));
+	}
+
+	public void setHikingAltEnabledSync(boolean enabled) {
+		database.setConfig("hiking_alt_enabled", enabled ? "1" : "0");
+	}
+
+	public boolean isCyclingAltEnabledSync() {
+		return "1".equals(database.getConfig("cycling_alt_enabled"));
+	}
+
+	public void setCyclingAltEnabledSync(boolean enabled) {
+		database.setConfig("cycling_alt_enabled", enabled ? "1" : "0");
+	}
+
+	public int getMotorcycleBreakDurationMinutes() {
+		return parseInt(database.getConfig("moto_break_duration_min"), 20);
+	}
+
+	public int getMotorcycleMaxDailyHours() {
+		return parseInt(database.getConfig("moto_max_daily_h"), 8);
 	}
 
 	public int getPoiRadiusM() {
@@ -290,6 +352,42 @@ public class DriverBreakSettings implements BreakTimer.ThresholdProvider {
 
 	public void getEnergyParamsAsync(@NonNull ConfigCallback<EnergyParams> callback) {
 		runAsync(() -> callback.onResult(getEnergyParamsSync()), callback);
+	}
+
+	/**
+	 * Reads {@link #isUseEnergyRoutingSync()} from the DB thread, waiting up to a few seconds.
+	 * Safe to call from any thread except {@link #getDbExecutor()}.
+	 */
+	public boolean readEnergyRoutingEnabledBlocking() {
+		Future<Boolean> future = dbExecutor.submit(this::isUseEnergyRoutingSync);
+		try {
+			return Boolean.TRUE.equals(future.get(5, TimeUnit.SECONDS));
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			LOG.warn("DriverBreak: interrupted while reading energy routing setting");
+		} catch (ExecutionException e) {
+			LOG.error("DriverBreak: failed to read energy routing setting", e.getCause());
+		} catch (TimeoutException e) {
+			LOG.warn("DriverBreak: timed out reading energy routing setting");
+		}
+		return false;
+	}
+
+	@NonNull
+	public EnergyParams readEnergyParamsBlocking() {
+		Future<EnergyParams> future = dbExecutor.submit(this::getEnergyParamsSync);
+		try {
+			EnergyParams params = future.get(5, TimeUnit.SECONDS);
+			return params != null ? params : getEnergyParamsSync();
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			LOG.warn("DriverBreak: interrupted while reading energy params");
+		} catch (ExecutionException e) {
+			LOG.error("DriverBreak: failed to read energy params", e.getCause());
+		} catch (TimeoutException e) {
+			LOG.warn("DriverBreak: timed out reading energy params");
+		}
+		return new EnergyParams(80.0, 0.30, 2.2, 0.0, 0.7);
 	}
 
 	private <T> void runAsync(@NonNull Runnable task, @NonNull ConfigCallback<T> callback) {

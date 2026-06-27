@@ -17,6 +17,7 @@
 package net.osmand.plus.plugins.driverbreak;
 
 import android.app.Activity;
+import android.content.Context;
 
 import android.os.AsyncTask;
 
@@ -44,8 +45,11 @@ import net.osmand.plus.views.mapwidgets.WidgetType;
 import net.osmand.plus.views.mapwidgets.WidgetsPanel;
 import net.osmand.plus.views.mapwidgets.widgets.MapWidget;
 
+import net.osmand.plus.views.OsmandMapTileView;
+
 import org.apache.commons.logging.Log;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -56,7 +60,7 @@ import java.util.concurrent.Executors;
  * TODO: EV/battery electric ECU backend — design only; no implementation in this release.
  * TODO: Weekly/bi-weekly truck rest accumulation — daily limits only.
  * TODO: Deep routing integration via routing.xml height_obstacle when energy routing should
- *       affect BinaryRoutePlanner directly instead of post-route comparison.
+ *       affect BinaryRoutePlanner directly (currently variants are ranked after calculation).
  */
 public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationListener {
 
@@ -77,10 +81,29 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 	private OBDBackend obdBackend;
 	private J1939Backend j1939Backend;
 
+	@Nullable
+	private RestStopMapLayer restStopLayer;
+
 	private volatile boolean energyRoutingEnabled;
+	@Nullable
+	private List<RouteSegmentResult> pendingEnergyVariant;
+	@Nullable
+	private RouteCalculationResult pendingEnergyRoute;
 
 	private final ExecutorService downloadExecutor = Executors.newSingleThreadExecutor(r -> {
+		Thread t = new Thread(r, "driver-break-elevation");
+		t.setDaemon(true);
+		return t;
+	});
+
+	private final ExecutorService energyAnalysisExecutor = Executors.newSingleThreadExecutor(r -> {
 		Thread t = new Thread(r, "driver-break-energy");
+		t.setDaemon(true);
+		return t;
+	});
+
+	private final ExecutorService restStopExecutor = Executors.newSingleThreadExecutor(r -> {
+		Thread t = new Thread(r, "driver-break-rest-stops");
 		t.setDaemon(true);
 		return t;
 	});
@@ -104,7 +127,7 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 		elevationDownloadCoordinator = new ElevationDownloadCoordinator(app, settings, elevationProvider,
 				elevationDownloadManager, downloadExecutor);
 		poiDiscovery = new PoiDiscovery(app, settings);
-		restStopFinder = new RestStopFinder(app, settings, poiDiscovery, elevationProvider);
+		restStopFinder = new RestStopFinder(app, settings, poiDiscovery, restStopExecutor);
 		routeValidator = new RouteValidator();
 		adaptiveFuelLearner = new AdaptiveFuelLearner(settings);
 		obdBackend = new OBDBackend(app);
@@ -162,17 +185,37 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 	public void mapActivityCreate(@NonNull MapActivity activity) {
 		ensureInitialized();
 		mapActivity = activity;
+		registerLayers(activity, activity);
 		if (elevationDownloadCoordinator != null) {
 			elevationDownloadCoordinator.setMapActivity(activity);
 			elevationDownloadCoordinator.onPluginEnabledFromUi(activity);
 		}
+		settings.getTravelModeAsync(mode -> {
+			if (breakTimer != null) {
+				breakTimer.setMode(mode);
+			}
+		});
 		app.getRoutingHelper().addCalculationProgressListener(routeCalculationProgressListener);
+	}
+
+	@Override
+	public void registerLayers(@NonNull Context context, @Nullable MapActivity mapActivity) {
+		if (restStopLayer == null) {
+			restStopLayer = new RestStopMapLayer(context);
+			app.getOsmandMap().getMapView().addLayer(restStopLayer, 4.5f);
+		} else {
+			OsmandMapTileView mapView = app.getOsmandMap().getMapView();
+			if (!mapView.getLayers().contains(restStopLayer)) {
+				mapView.addLayer(restStopLayer, 4.5f);
+			}
+		}
 	}
 
 	@Override
 	public void mapActivityResume(@NonNull MapActivity activity) {
 		ensureInitialized();
 		app.getLocationProvider().addLocationListener(this);
+		updateRestStopsForRoute(app.getRoutingHelper().getRoute());
 	}
 
 	@Override
@@ -277,12 +320,55 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 	}
 
 	/**
+	 * Applies the pending lower-energy route variant chosen during the last energy analysis.
+	 */
+	public void applyPendingEnergyRoute() {
+		List<RouteSegmentResult> variant = pendingEnergyVariant;
+		RouteCalculationResult baseRoute = pendingEnergyRoute;
+		if (variant == null || baseRoute == null) {
+			return;
+		}
+		if (EnergyRouteApplier.applyVariant(app, variant, baseRoute)) {
+			updateRestStopsForRoute(app.getRoutingHelper().getRoute());
+			MapActivity activity = mapActivity;
+			if (activity != null) {
+				activity.refreshMap();
+			}
+		}
+	}
+
+	/**
 	 * Called when travel mode changes in settings.
 	 */
 	public void onTravelModeChanged(@NonNull TravelMode mode) {
 		if (breakTimer != null) {
 			breakTimer.setMode(mode);
 		}
+		RouteCalculationResult route = app.getRoutingHelper().getRoute();
+		updateRestStopsForRoute(route);
+	}
+
+	private void updateRestStopsForRoute(@Nullable RouteCalculationResult route) {
+		if (restStopFinder == null || restStopLayer == null || settings == null) {
+			return;
+		}
+		if (route == null || route.isEmpty()) {
+			restStopLayer.setRestStops(Collections.emptyList());
+			MapActivity activity = mapActivity;
+			if (activity != null) {
+				activity.refreshMap();
+			}
+			return;
+		}
+		settings.getTravelModeAsync(mode -> restStopFinder.findRestStops(route, mode, stops -> {
+			if (restStopLayer != null) {
+				restStopLayer.setRestStops(stops);
+				MapActivity activity = mapActivity;
+				if (activity != null) {
+					activity.refreshMap();
+				}
+			}
+		}));
 	}
 
 	/**
@@ -322,57 +408,79 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 					if (route != null && !route.isEmpty() && elevationDownloadCoordinator != null) {
 						elevationDownloadCoordinator.onRouteCalculated(route);
 					}
-					if (!energyRoutingEnabled || energyModel == null || elevationProvider == null
-							|| settings == null) {
+					updateRestStopsForRoute(route);
+					if (energyModel == null || elevationProvider == null || settings == null) {
 						return;
 					}
 					if (route == null || route.isEmpty()) {
 						return;
 					}
-					OsmAndTaskManager.executeTask(new AsyncTask<Void, Void, EnergyComparisonResult>() {
-						@Override
-						protected EnergyComparisonResult doInBackground(Void... voids) {
-							try {
-								return analyzeRouteEnergy(route);
-							} catch (RuntimeException e) {
-								LOG.error("DriverBreak: route energy analysis failed", e);
-								return null;
-							}
-						}
-
-						@Override
-						protected void onPostExecute(EnergyComparisonResult result) {
-							if (result == null || !result.showSuggestion) {
-								return;
-							}
-							MapActivity activity = mapActivity;
-							if (activity == null) {
-								return;
-							}
-							FragmentManager fm = activity.getSupportFragmentManager();
-							EnergyRouteBottomSheet.showInstance(fm, null, app.getSettings().getApplicationMode(),
-									true, result.energySavingFraction, result.distanceIncreaseFraction);
-						}
-					}, downloadExecutor);
+					scheduleEnergyAnalysis(route);
 				}
 			};
 
+	private void scheduleEnergyAnalysis(@NonNull RouteCalculationResult route) {
+		energyAnalysisExecutor.execute(() -> {
+			LOG.info("DriverBreak: starting route energy analysis");
+			energyRoutingEnabled = settings.readEnergyRoutingEnabledBlocking();
+			if (!energyRoutingEnabled) {
+				LOG.info("DriverBreak: energy routing disabled in settings");
+				return;
+			}
+			EnergyComparisonResult result;
+			try {
+				EnergyParams params = settings.readEnergyParamsBlocking();
+				result = analyzeRouteEnergy(route, params);
+			} catch (RuntimeException e) {
+				LOG.error("DriverBreak: route energy analysis failed", e);
+				return;
+			}
+			app.runInUIThread(() -> handleEnergyAnalysisResult(result, route));
+		});
+	}
+
+	private void handleEnergyAnalysisResult(@Nullable EnergyComparisonResult result,
+			@NonNull RouteCalculationResult route) {
+		if (result == null || !result.showSuggestion || result.bestVariant == null) {
+			return;
+		}
+		pendingEnergyVariant = result.bestVariant;
+		pendingEnergyRoute = route;
+		boolean applied = EnergyRouteApplier.applyVariant(app, result.bestVariant, route);
+		if (applied) {
+			updateRestStopsForRoute(app.getRoutingHelper().getRoute());
+		}
+		MapActivity activity = mapActivity;
+		if (activity == null) {
+			return;
+		}
+		if (applied) {
+			activity.refreshMap();
+		}
+		FragmentManager fm = activity.getSupportFragmentManager();
+		EnergyRouteBottomSheet.showInstance(fm, null, app.getSettings().getApplicationMode(),
+				true, result.energySavingFraction, result.distanceIncreaseFraction, applied);
+	}
+
 	@NonNull
-	private EnergyComparisonResult analyzeRouteEnergy(@NonNull RouteCalculationResult route) {
-		EnergyParams params = settings.getEnergyParamsSync();
+	private EnergyComparisonResult analyzeRouteEnergy(@NonNull RouteCalculationResult route,
+			@NonNull EnergyParams params) {
 		List<List<RouteSegmentResult>> variants = EnergyRouteAlternativeExtractor.collectRouteVariants(route);
 		if (variants.isEmpty()) {
-			return new EnergyComparisonResult(false, 0.0, 0.0);
+			return new EnergyComparisonResult(false, 0.0, 0.0, null);
 		}
 		List<RouteSegmentResult> primarySegments = variants.get(0);
-		double primaryEnergyJ = energyModel.routeCost(
-				EnergyRouteHelper.buildSegmentsFromRoute(primarySegments, elevationProvider), params);
+		List<SegmentData> primarySegmentData = EnergyRouteHelper.buildSegmentsFromRoute(primarySegments,
+				elevationProvider);
+		double primaryEnergyJ = energyModel.routeCost(primarySegmentData, params);
 		double primaryDistanceM = EnergyRouteHelper.segmentListDistanceM(primarySegments);
 		LOG.info("DriverBreak: primary route energy=" + primaryEnergyJ + " J, distance="
-				+ primaryDistanceM + " m, variants=" + variants.size());
+				+ primaryDistanceM + " m, energySegments=" + primarySegmentData.size()
+				+ ", variants=" + variants.size());
 
 		double bestAltEnergyJ = primaryEnergyJ;
 		double bestAltDistanceM = primaryDistanceM;
+		List<RouteSegmentResult> bestVariant = null;
 		for (int i = 1; i < variants.size(); i++) {
 			List<RouteSegmentResult> altSegments = variants.get(i);
 			double altEnergyJ = energyModel.routeCost(
@@ -382,26 +490,30 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 					&& altEnergyJ < bestAltEnergyJ) {
 				bestAltEnergyJ = altEnergyJ;
 				bestAltDistanceM = altDistanceM;
+				bestVariant = altSegments;
 			}
 		}
-		if (bestAltEnergyJ >= primaryEnergyJ || primaryEnergyJ <= 0.0) {
-			return new EnergyComparisonResult(false, 0.0, 0.0);
+		if (bestVariant == null || bestAltEnergyJ >= primaryEnergyJ || primaryEnergyJ <= 0.0) {
+			return new EnergyComparisonResult(false, 0.0, 0.0, null);
 		}
 		double saving = (primaryEnergyJ - bestAltEnergyJ) / primaryEnergyJ;
 		double distanceIncrease = (bestAltDistanceM - primaryDistanceM) / primaryDistanceM;
-		return new EnergyComparisonResult(true, saving, distanceIncrease);
+		return new EnergyComparisonResult(true, saving, distanceIncrease, bestVariant);
 	}
 
 	private static final class EnergyComparisonResult {
 		final boolean showSuggestion;
 		final double energySavingFraction;
 		final double distanceIncreaseFraction;
+		@Nullable
+		final List<RouteSegmentResult> bestVariant;
 
 		EnergyComparisonResult(boolean showSuggestion, double energySavingFraction,
-				double distanceIncreaseFraction) {
+				double distanceIncreaseFraction, @Nullable List<RouteSegmentResult> bestVariant) {
 			this.showSuggestion = showSuggestion;
 			this.energySavingFraction = energySavingFraction;
 			this.distanceIncreaseFraction = distanceIncreaseFraction;
+			this.bestVariant = bestVariant;
 		}
 	}
 }

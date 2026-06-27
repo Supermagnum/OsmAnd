@@ -30,6 +30,8 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Validates rest-stop coordinates against building and glacier proximity using Overpass.
@@ -49,6 +51,20 @@ public class PoiLocationValidator {
 
 	private static final int OVERPASS_MAX_ATTEMPTS = 3;
 
+	/** Single attempt for proximity validation; fail open when Overpass is unavailable. */
+	private static final int OVERPASS_VALIDATION_ATTEMPTS = 1;
+
+	/** Minimum spacing between Overpass requests to reduce rate limiting. */
+	private static final long OVERPASS_MIN_INTERVAL_MS = 1500L;
+
+	/** Grid size in degrees (~110 m) for building-proximity cache keys. */
+	private static final double BUILDING_CACHE_GRID_DEG = 0.001;
+
+	private static final Map<String, Boolean> buildingProximityCache = new ConcurrentHashMap<>();
+
+	private static final Object OVERPASS_LOCK = new Object();
+	private static long lastOverpassRequestMs;
+
 	private PoiLocationValidator() {
 	}
 
@@ -59,10 +75,17 @@ public class PoiLocationValidator {
 		if (minDistBuildingsM <= 0) {
 			return true;
 		}
+		String cacheKey = buildingCacheKey(lat, lon, minDistBuildingsM);
+		Boolean cached = buildingProximityCache.get(cacheKey);
+		if (cached != null) {
+			return cached;
+		}
 		String query = String.format(Locale.US,
 				"[out:json][timeout:25];(way[\"building\"](around:%d,%.6f,%.6f););out center;",
 				minDistBuildingsM, lat, lon);
-		return countOverpassElements(query) == 0;
+		boolean farEnough = countOverpassElements(query, OVERPASS_VALIDATION_ATTEMPTS) == 0;
+		buildingProximityCache.put(cacheKey, farEnough);
+		return farEnough;
 	}
 
 	/**
@@ -76,12 +99,23 @@ public class PoiLocationValidator {
 		String query = String.format(Locale.US,
 				"[out:json][timeout:25];(way[\"natural\"=\"glacier\"](around:%d,%.6f,%.6f););out center;",
 				minDistGlaciersM, lat, lon);
-		return countOverpassElements(query) == 0;
+		return countOverpassElements(query, OVERPASS_VALIDATION_ATTEMPTS) == 0;
+	}
+
+	@NonNull
+	static String buildingCacheKey(double lat, double lon, int minDistBuildingsM) {
+		long gridLat = Math.round(lat / BUILDING_CACHE_GRID_DEG);
+		long gridLon = Math.round(lon / BUILDING_CACHE_GRID_DEG);
+		return gridLat + "," + gridLon + "," + minDistBuildingsM;
 	}
 
 	private static int countOverpassElements(@NonNull String query) {
+		return countOverpassElements(query, OVERPASS_MAX_ATTEMPTS);
+	}
+
+	private static int countOverpassElements(@NonNull String query, int maxAttempts) {
 		try {
-			String response = executeOverpassWithRetry(query);
+			String response = executeOverpassWithRetry(query, maxAttempts);
 			if (Algorithms.isEmpty(response)) {
 				return 0;
 			}
@@ -96,9 +130,15 @@ public class PoiLocationValidator {
 
 	@NonNull
 	static String executeOverpassWithRetry(@NonNull String query) {
+		return executeOverpassWithRetry(query, OVERPASS_MAX_ATTEMPTS);
+	}
+
+	@NonNull
+	static String executeOverpassWithRetry(@NonNull String query, int maxAttempts) {
 		long delayMs = OVERPASS_RETRY_INITIAL_MS;
-		for (int attempt = 0; attempt < OVERPASS_MAX_ATTEMPTS; attempt++) {
+		for (int attempt = 0; attempt < maxAttempts; attempt++) {
 			try {
+				waitForOverpassSlot();
 				HttpURLConnection connection = NetworkUtils.getHttpURLConnection(OVERPASS_URL);
 				connection.setRequestMethod("POST");
 				connection.setDoOutput(true);
@@ -126,5 +166,16 @@ public class PoiLocationValidator {
 			}
 		}
 		return "";
+	}
+
+	private static void waitForOverpassSlot() throws InterruptedException {
+		synchronized (OVERPASS_LOCK) {
+			long now = System.currentTimeMillis();
+			long waitMs = lastOverpassRequestMs + OVERPASS_MIN_INTERVAL_MS - now;
+			if (waitMs > 0) {
+				Thread.sleep(waitMs);
+			}
+			lastOverpassRequestMs = System.currentTimeMillis();
+		}
 	}
 }

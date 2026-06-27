@@ -30,6 +30,7 @@ import androidx.fragment.app.FragmentManager;
 import androidx.preference.EditTextPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceFragmentCompat;
+import androidx.preference.PreferenceGroup;
 import androidx.preference.SwitchPreferenceCompat;
 import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
@@ -187,13 +188,20 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 			plugin = PluginsHelper.getPlugin(DriverBreakPlugin.class);
 			androidx.preference.PreferenceScreen screen = getPreferenceScreen();
 			if (screen != null) {
-				for (int i = 0; i < screen.getPreferenceCount(); i++) {
-					androidx.preference.Preference pref = screen.getPreference(i);
-					pref.setOnPreferenceChangeListener(this::onPreferenceChange);
-				}
+				registerPreferenceListeners(screen);
 			}
 			setupTravelModeList();
 			refreshFromDatabase();
+		}
+
+		private void registerPreferenceListeners(@NonNull Preference preference) {
+			preference.setOnPreferenceChangeListener(this::onPreferenceChange);
+			if (preference instanceof PreferenceGroup) {
+				PreferenceGroup group = (PreferenceGroup) preference;
+				for (int i = 0; i < group.getPreferenceCount(); i++) {
+					registerPreferenceListeners(group.getPreference(i));
+				}
+			}
 		}
 
 		private boolean isElevationTab() {
@@ -335,9 +343,21 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 			setEditText("driver_break_truck_break_duration_min", snapshot.truckBreakDurationMin);
 			setEditText("driver_break_truck_max_daily_h", snapshot.truckMaxDailyH);
 			setEditText("driver_break_hiking_main_dist_km", snapshot.hikingMainDistKm);
+			setSwitch("driver_break_hiking_alt_enabled", snapshot.hikingAltEnabled);
+			setEditText("driver_break_hiking_alt_dist_km", snapshot.hikingAltDistKm);
+			setEditText("driver_break_hiking_max_daily_km", snapshot.hikingMaxDailyKm);
 			setEditText("driver_break_cycling_main_dist_km", snapshot.cyclingMainDistKm);
+			setSwitch("driver_break_cycling_alt_enabled", snapshot.cyclingAltEnabled);
+			setEditText("driver_break_cycling_alt_dist_km", snapshot.cyclingAltDistKm);
+			setEditText("driver_break_cycling_max_daily_km", snapshot.cyclingMaxDailyKm);
 			setEditText("driver_break_moto_soft_limit_min", snapshot.motoSoftLimitMin);
 			setEditText("driver_break_moto_mandatory_break_min", snapshot.motoMandatoryBreakMin);
+			setEditText("driver_break_moto_break_duration_min", snapshot.motoBreakDurationMin);
+			setEditText("driver_break_moto_max_daily_h", snapshot.motoMaxDailyH);
+			updateAltDistanceEnabled("driver_break_hiking_alt_enabled", "driver_break_hiking_alt_dist_km",
+					snapshot.hikingAltEnabled);
+			updateAltDistanceEnabled("driver_break_cycling_alt_enabled", "driver_break_cycling_alt_dist_km",
+					snapshot.cyclingAltEnabled);
 			setEditText("driver_break_poi_radius_m", snapshot.poiRadiusM);
 		 setEditText("driver_break_water_radius_m", snapshot.waterRadiusM);
 			setEditText("driver_break_cabin_radius_m", snapshot.cabinRadiusM);
@@ -372,6 +392,14 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 			if (pref instanceof androidx.preference.EditTextPreference) {
 				((androidx.preference.EditTextPreference) pref).setText(value);
 				pref.setSummary(value);
+			}
+		}
+
+		private void updateAltDistanceEnabled(@NonNull String switchKey, @NonNull String distanceKey,
+				boolean enabled) {
+			Preference distancePref = findPreference(distanceKey);
+			if (distancePref != null) {
+				distancePref.setEnabled(enabled);
 			}
 		}
 
