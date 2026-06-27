@@ -65,6 +65,14 @@
 	<string name="driver_break_energy_frontal_area_sqm_desc">Vehicle frontal area in square metres (0.05 to 20).</string>
 	<string name="driver_break_srtm_tiles_summary">Cached elevation tiles</string>
 	<string name="driver_break_srtm_tiles_summary_value">%1$d HGT/GeoTIFF tiles in local cache.</string>
+	<string name="driver_break_elevation_region_category">Download by county or country</string>
+	<string name="driver_break_elevation_region_summary">County or country at map position</string>
+	<string name="driver_break_elevation_region_summary_value">%1$s — %2$d tiles missing locally</string>
+	<string name="driver_break_elevation_region_complete">%1$s — all elevation tiles cached</string>
+	<string name="driver_break_elevation_region_unknown">Open the map or enable location to detect your county or country.</string>
+	<string name="driver_break_download_region">Download elevation for county or country</string>
+	<string name="driver_break_download_region_desc">Download all missing SRTM tiles for the OsmAnd county or country at your GPS fix or map centre.</string>
+	<string name="driver_break_elevation_single_tile_category">Single tile</string>
 	<string name="driver_break_download_current_tile">Download tile at current location</string>
 	<!--  AisTrackerSettings  -->
 	<string name="ais_own_object">Settings for display of own AIS object</string>

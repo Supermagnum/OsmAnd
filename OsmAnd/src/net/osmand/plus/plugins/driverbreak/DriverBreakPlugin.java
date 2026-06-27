@@ -241,6 +241,12 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 	}
 
 	@NonNull
+	public ElevationDownloadCoordinator getElevationDownloadCoordinator() {
+		ensureInitialized();
+		return elevationDownloadCoordinator;
+	}
+
+	@NonNull
 	public SRTMElevationProvider getElevationProvider() {
 		ensureInitialized();
 		return elevationProvider;
@@ -326,7 +332,12 @@ public class DriverBreakPlugin extends OsmandPlugin implements OsmAndLocationLis
 					OsmAndTaskManager.executeTask(new AsyncTask<Void, Void, EnergyComparisonResult>() {
 						@Override
 						protected EnergyComparisonResult doInBackground(Void... voids) {
-							return analyzeRouteEnergy(route);
+							try {
+								return analyzeRouteEnergy(route);
+							} catch (RuntimeException e) {
+								LOG.error("DriverBreak: route energy analysis failed", e);
+								return null;
+							}
 						}
 
 						@Override

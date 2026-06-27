@@ -209,7 +209,7 @@ public class SRTMElevationProvider {
 			if (x < 0 || y < 0) {
 				return VOID_ELEVATION;
 			}
-			ImageWindow window = new ImageWindow(x, y, 1, 1);
+			ImageWindow window = new ImageWindow(x, y);
 			Rasters rasters = directory.readRasters(window);
 			if (rasters == null) {
 				return VOID_ELEVATION;
@@ -218,6 +218,9 @@ public class SRTMElevationProvider {
 			return sampleToElevationM(sample, directory);
 		} catch (IOException e) {
 			LOG.error("DriverBreak: GeoTIFF read failed for " + filepath.getName(), e);
+			return VOID_ELEVATION;
+		} catch (RuntimeException e) {
+			LOG.error("DriverBreak: GeoTIFF parse failed for " + filepath.getName(), e);
 			return VOID_ELEVATION;
 		}
 	}

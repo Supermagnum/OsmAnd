@@ -45,11 +45,11 @@ For truck drivers, default interval values align with EU Regulation EC 561/2006 
 
 ### Hiking {#travel-mode-hiking}
 
-Hiking mode tracks **distance**. Default main rest intervals follow the historical Scandinavian **rast** unit (11.295 km main stage, 2.275 km alternative stage, 40 km suggested maximum per day). Rest stops include water (drinking water, fountain, spring) and cabins or huts (wilderness hut, alpine hut, hostel, camping). Optional SRTM elevation supports energy-aware route comparison when enabled.
+Hiking mode tracks **distance**. Default main rest intervals follow the historical Scandinavian **rast** unit (11.295 km main stage, 2.275 km alternative stage, 40 km suggested maximum per day); see [Rast and vei](#rast-and-vei) for the historical basis. Rest stops include water (drinking water, fountain, spring) and cabins or huts (wilderness hut, alpine hut, hostel, camping). Optional SRTM elevation supports energy-aware route comparison when enabled.
 
 ### Cycling {#travel-mode-cycling}
 
-Cycling mode uses the same **rast/vei** concept scaled for bicycles: default 28.24 km main stage, 5.69 km alternative stage, and 100 km suggested maximum per day. Water and cabin POIs match hiking. Charging stations, bicycle repair, and related service POIs are searched at rest stops when present in map data or via Overpass fallback.
+Cycling mode uses the same **rast/vei** concept scaled for bicycles: default 28.24 km main stage, 5.69 km alternative stage, and 100 km suggested maximum per day (see [Rast and vei](#rast-and-vei)). Water and cabin POIs match hiking. Charging stations, bicycle repair, and related service POIs are searched at rest stops when present in map data or via Overpass fallback.
 
 ### Motorcycle {#travel-mode-motorcycle}
 
@@ -59,6 +59,14 @@ Motorcycle mode tracks **riding time** with defaults of a 2-hour soft limit, man
 **Adventure/dual-sport terrain** (where implemented in routing profiles) is limited to legally accessible ways: the plugin must not route across uncultivated land, unmapped terrain, or ways tagged `access=private` or `access=no`. Only `highway=track` and similar ways with explicit `access=yes`, `access=permissive`, or `motorcycle=yes` / `designated` / `permissive` are considered. Off-road motor traffic on uncultivated land is prohibited without a permit in many countries—including Norway (Motorferdselloven, 1977), Sweden (Terrängkörningslagen, 1975:1313), Finland (Maastoliikennelaki, 1710/1995), and similar laws elsewhere.
 :::
 
+## Rast and vei (historical basis for hiking and cycling defaults) {#rast-and-vei}
+
+The suggested default rest intervals for hiking (11.295 km main, 2.275 km alternative; 40 km daily max) and for cycling (28.24 km main, 5.69 km alternative; 100 km daily max) are inspired by the old Scandinavian units of length **rast** and **vei**. For cycling, the same rast/vei concept is used with distances scaled up. A "rast" was the distance one traveled on foot before needing a rest ("rast," "pause," or the like); it corresponded to a **mil** and was often tied to the length of the ell. The distance varied by region and over time. In the 900s a rast was about 192 stone throws, divided into four quarters ("fjerdingvei"), and corresponded to roughly 9,100.8 meters; in the 12th century it was expressed as 16,000 ells (four quarters of 8,000 feet) but remained in the same order of magnitude.
+
+A "dagsvei" (day's way/journey) was a traditional Scandinavian unit meaning roughly how far you could walk in a day, commonly reckoned at about 40 km.
+
+The plugin's hiking and cycling interval defaults follow from these historical rast-based distances.
+
 ## Rest Stop Suggestions {#rest-stop-suggestions}
 
 The plugin suggests stops based on your travel mode:
@@ -66,7 +74,30 @@ The plugin suggests stops based on your travel mode:
 - **Hiking and cycling** — Rest positions are placed at configured **distance intervals** along the route (main and alternative stage distances, plus a daily maximum).
 - **Car, truck, and motorcycle** — The plugin walks the **route geometry**, accumulates segment length, and after a minimum distance (about 5 km) looks for suitable highway types (for example unclassified, service, track, tertiary). Each candidate is checked against building and glacier distance rules before POIs are attached.
 
-**POI search** prefers **map-based** OsmAnd search within configurable radii (defaults: water 2 km, cabins 5 km, general POIs 15 km, network huts up to 25 km). If map data is insufficient, **Overpass API** fallback queries run in the background. **DNT/network priority** (Overnight tab) prefers Norwegian Trekking Association and similar network cabins when sorting results. **Hiking/pilgrimage priority** adds places of worship within the general POI radius on hiking and cycling stages.
+**POI search** prefers **map-based** OsmAnd search within configurable radii (defaults: water 2 km, cabins 5 km, general POIs 15 km, network huts up to 25 km). If map data is insufficient, **Overpass API** fallback queries run in the background. **Hiking/pilgrimage priority** adds places of worship within the general POI radius on hiking and cycling stages.
+
+### Networks and priorities {#networks-and-priorities}
+
+- **DNT/network priority** — Optional priority for network huts (e.g. Norwegian Trekking Association, DNT) with configurable hut search radius. Enable this on the **Overnight** tab. Set the network hut search radius according to typical spacing (see below); in remote areas consider raising it toward the upper range to include the next cabin.
+
+**Networked cabin spacing** (nearest-neighbor distances, for setting search radius):
+
+- **Norway (DNT)** — OpenStreetMap relation 1110420 (DNT cabins): 449 huts; average 10.56 km, median 8.83 km, max 100.45 km.
+- **Sweden** — Overpass API (`tourism=wilderness_hut`, `tourism=alpine_hut` in Sweden): 439 huts total; average 12.31 km, median 8.24 km, max 83.85 km. STF (Svenska Turistföreningen) network only (42 huts): average 14.47 km, median 11.50 km, max 83.85 km.
+- **Finland** — Overpass API (`tourism=wilderness_hut`, `tourism=alpine_hut` in Finland): 324 huts total; average 11.72 km, median 6.68 km, max 64.32 km. Metsähallitus network only (108 huts): average 16.05 km, median 5.31 km, max 247 km (remote areas).
+- **Germany** — Overpass API (`tourism=wilderness_hut`, `tourism=alpine_hut` in Germany): 261 huts total; average 12.98 km, median 9.72 km, max 119.76 km. DAV (Deutscher Alpenverein) network: 22 huts in sample.
+- **Switzerland** — Overpass API (`tourism=wilderness_hut`, `tourism=alpine_hut` in Switzerland): 328 huts total; average 4.40 km, median 3.82 km, max 23.70 km. SAC/CAS (Schweizer Alpen-Club) and similar: 66 huts in sample; denser spacing in the Alps.
+- **Austria** — Overpass API (`tourism=wilderness_hut`, `tourism=alpine_hut` in Austria): 330 huts total; average 5.30 km, median 3.56 km, max 102.51 km. OeAV (Österreichischer Alpenverein) and similar: 22 huts in sample; denser spacing in the Alps.
+
+**Open / non-networked huts** (no `network` tag, not operated by DNT/STF/DAV/SAC/OeAV/Metsähallitus etc.) can also show somewhat regular spacing in the same countries. Use the same Overpass tag set and exclude networked operators; nearest-neighbor distances (for setting cabin search radius) in the samples:
+
+- **Germany** — 235 huts; average 14.29 km, median 10.22 km, max 119.76 km.
+- **Switzerland** — 261 huts; average 4.93 km, median 4.03 km, max 23.70 km.
+- **Austria** — 287 huts; average 5.71 km, median 3.65 km, max 102.51 km.
+- **Sweden** — 395 huts; average 12.45 km, median 7.85 km, max 64.86 km.
+- **Finland** — 206 huts; average 17.00 km, median 12.33 km, max 75.75 km.
+
+Set **cabin search radius** in the typical-to-max range for the region (e.g. 5–15 km in the Alps, 10–20 km in Scandinavia/Germany/Finland for open huts). Use at least the typical spacing (e.g. 10–12 km) so nearby huts are found; in remote areas consider raising the radius toward the max values.
 
 **Distance from buildings** — For overnight or camping-style stops (for example under right-to-roam rules such as Norwegian *allemannsretten*), candidates closer than the configured minimum (default 150 m) to buildings or dwellings are rejected.
 
@@ -177,7 +208,7 @@ Hiking and cycling also support **alternative stage** distances (defaults 2.275 
 | Setting | Description |
 |---|---|
 | **Water POIs** | Include drinking water, fountains, and springs at car/truck/motorcycle stops in remote or hot conditions (also affects hiking water search labelling in this build). |
-| **DNT/network hut priority** | Prefer network-operated cabins (DNT, STF, DAV, SAC, and similar) when sorting hut results. |
+| **DNT/network hut priority** | Prefer network-operated cabins (DNT, STF, DAV, SAC, and similar) when sorting hut results. See [Networks and priorities](#networks-and-priorities) for typical hut spacing when choosing **Cabin search radius**. |
 | **General POI search radius (m)** | Radius for cafes, viewpoints, worship, and general amenities (default 15000). |
 | **Water POI radius (m)** | Radius for water POIs (default 2000). |
 | **Cabin search radius (m)** | Radius for huts and cabins (default 5000). |

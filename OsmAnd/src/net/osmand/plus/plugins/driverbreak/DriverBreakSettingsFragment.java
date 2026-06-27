@@ -20,10 +20,14 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ImageView;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
+import androidx.preference.EditTextPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceFragmentCompat;
 import androidx.preference.SwitchPreferenceCompat;
@@ -34,9 +38,17 @@ import com.google.android.material.tabs.TabLayout;
 import com.google.android.material.tabs.TabLayoutMediator;
 
 import net.osmand.Location;
+import net.osmand.data.LatLon;
+import net.osmand.plus.OsmandApplication;
 import net.osmand.plus.R;
+import net.osmand.plus.activities.MapActivity;
 import net.osmand.plus.plugins.PluginsHelper;
+import net.osmand.plus.settings.backend.ApplicationMode;
+import net.osmand.plus.settings.bottomsheets.EditTextPreferenceBottomSheet;
+import net.osmand.plus.settings.bottomsheets.SingleSelectPreferenceBottomSheet;
 import net.osmand.plus.settings.fragments.BaseSettingsFragment;
+import net.osmand.plus.settings.fragments.OnPreferenceChanged;
+import net.osmand.plus.settings.preferences.ListPreferenceEx;
 import net.osmand.plus.utils.AndroidUtils;
 import net.osmand.plus.utils.UiUtilities;
 
@@ -103,6 +115,31 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 		super.onDestroyView();
 	}
 
+	@Override
+	protected void createToolbar(@NonNull LayoutInflater inflater, @NonNull View view) {
+		// Tabbed layout uses global_preference_toolbar (no appbar); skip BaseSettingsFragment.createToolbar.
+		TextView toolbarTitle = view.findViewById(R.id.toolbar_title);
+		if (toolbarTitle != null) {
+			toolbarTitle.setText(R.string.driver_break_plugin_name);
+		}
+		TextView toolbarSubtitle = view.findViewById(R.id.toolbar_subtitle);
+		if (toolbarSubtitle != null) {
+			toolbarSubtitle.setVisibility(View.GONE);
+		}
+		View closeButton = view.findViewById(R.id.close_button);
+		if (closeButton != null) {
+			closeButton.setOnClickListener(v -> {
+				MapActivity mapActivity = getMapActivity();
+				if (mapActivity != null) {
+					mapActivity.onBackPressed();
+				}
+			});
+			if (closeButton instanceof ImageView) {
+				UiUtilities.rotateImageByLayoutDirection((ImageView) closeButton);
+			}
+		}
+	}
+
 	private static final class DriverBreakSettingsPagerAdapter extends FragmentStateAdapter {
 
 		DriverBreakSettingsPagerAdapter(@NonNull Fragment fragment) {
@@ -124,7 +161,8 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 	/**
 	 * One tab page inside {@link DriverBreakSettingsFragment}.
 	 */
-	public static class DriverBreakSettingsPageFragment extends PreferenceFragmentCompat {
+	public static class DriverBreakSettingsPageFragment extends PreferenceFragmentCompat
+			implements OnPreferenceChanged {
 
 		static final String ARG_PREFS_XML = "prefs_xml";
 
@@ -158,6 +196,12 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 			refreshFromDatabase();
 		}
 
+		private boolean isElevationTab() {
+			Bundle args = getArguments();
+			int prefsXml = args != null ? args.getInt(ARG_PREFS_XML, 0) : 0;
+			return prefsXml == R.xml.driver_break_settings_elevation;
+		}
+
 		@Override
 		public void onResume() {
 			super.onResume();
@@ -165,11 +209,42 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 		}
 
 		@Override
+		public void onDisplayPreferenceDialog(@NonNull Preference preference) {
+			FragmentManager fragmentManager = getParentFragmentManager();
+			if (fragmentManager == null) {
+				return;
+			}
+			OsmandApplication application = (OsmandApplication) requireContext().getApplicationContext();
+			ApplicationMode appMode = application.getSettings().getApplicationMode();
+			boolean usedOnMap = requireActivity() instanceof MapActivity;
+			if (preference instanceof ListPreferenceEx) {
+				SingleSelectPreferenceBottomSheet.showInstance(fragmentManager, preference.getKey(), this,
+						usedOnMap, appMode, false, false);
+			} else if (preference instanceof EditTextPreference) {
+				EditTextPreferenceBottomSheet.showInstance(fragmentManager, preference.getKey(), this,
+						usedOnMap, appMode);
+			} else {
+				super.onDisplayPreferenceDialog(preference);
+			}
+		}
+
+		@Override
+		public void onPreferenceChanged(@NonNull String prefId) {
+			refreshFromDatabase();
+		}
+
+		@Override
 		public boolean onPreferenceTreeClick(@NonNull Preference preference) {
-			if ("driver_break_download_current_tile".equals(preference.getKey()) && plugin != null) {
-				net.osmand.plus.OsmandApplication application =
-						(net.osmand.plus.OsmandApplication) requireContext().getApplicationContext();
-				Location location = application.getLocationProvider().getLastKnownLocation();
+			if (plugin == null) {
+				return super.onPreferenceTreeClick(preference);
+			}
+			String key = preference.getKey();
+			if ("driver_break_download_region".equals(key)) {
+				plugin.getElevationDownloadCoordinator().promptDownloadForCurrentRegion(requireActivity());
+				return true;
+			}
+			if ("driver_break_download_current_tile".equals(key)) {
+				LatLon location = resolveDownloadLocation();
 				if (location != null) {
 					plugin.getElevationDownloadManager().downloadTileAsync(location.getLatitude(),
 							location.getLongitude(), null);
@@ -179,17 +254,30 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 			return super.onPreferenceTreeClick(preference);
 		}
 
+		@Nullable
+		private LatLon resolveDownloadLocation() {
+			net.osmand.plus.OsmandApplication application =
+					(net.osmand.plus.OsmandApplication) requireContext().getApplicationContext();
+			Location location = application.getLocationProvider().getLastKnownLocation();
+			if (location != null) {
+				return new LatLon(location.getLatitude(), location.getLongitude());
+			}
+			if (application.getOsmandMap() != null && application.getOsmandMap().getMapView() != null) {
+				return application.getOsmandMap().getMapView().getCurrentRotatedTileBox().getCenterLatLon();
+			}
+			return null;
+		}
+
 		private boolean onPreferenceChange(@NonNull Preference preference, Object newValue) {
 			return DriverBreakSettingsController.applyChange(plugin, preference.getKey(), newValue);
 		}
 
 		private void setupTravelModeList() {
 			Preference travelMode = findPreference("driver_break_travel_mode");
-			if (!(travelMode instanceof net.osmand.plus.settings.preferences.ListPreferenceEx)) {
+			if (!(travelMode instanceof ListPreferenceEx)) {
 				return;
 			}
-			net.osmand.plus.settings.preferences.ListPreferenceEx list =
-					(net.osmand.plus.settings.preferences.ListPreferenceEx) travelMode;
+			ListPreferenceEx list = (ListPreferenceEx) travelMode;
 			TravelMode[] modes = TravelMode.values();
 			String[] entries = new String[modes.length];
 			String[] entryValues = new String[modes.length];
@@ -199,6 +287,7 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 			}
 			list.setEntries(entries);
 			list.setEntryValues(entryValues);
+			list.setDialogTitle(R.string.driver_break_travel_mode);
 		}
 
 		private void refreshFromDatabase() {
@@ -212,8 +301,23 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 					(net.osmand.plus.OsmandApplication) requireContext().getApplicationContext();
 			settings.getDbExecutor().execute(() -> {
 				DriverBreakSettingsSnapshot snapshot = DriverBreakSettingsSnapshot.load(settings, tileDir);
-				application.runInUIThread(() -> applySnapshot(snapshot));
+				application.runInUIThread(() -> {
+					applySnapshot(snapshot);
+					if (isElevationTab()) {
+						refreshElevationRegionSummary(activePlugin);
+					}
+				});
 			});
+		}
+
+		private void refreshElevationRegionSummary(@NonNull DriverBreakPlugin activePlugin) {
+			activePlugin.getElevationDownloadCoordinator().refreshRegionSummary(requireActivity(),
+					(summary, missingTileCount) -> {
+						Preference regionPref = findPreference("driver_break_elevation_region_summary");
+						if (regionPref != null) {
+							regionPref.setSummary(summary);
+						}
+					});
 		}
 
 		private void applySnapshot(@NonNull DriverBreakSettingsSnapshot snapshot) {
@@ -258,8 +362,8 @@ public class DriverBreakSettingsFragment extends BaseSettingsFragment {
 
 		private void setListValue(@NonNull String key, @NonNull String value) {
 			Preference pref = findPreference(key);
-			if (pref instanceof net.osmand.plus.settings.preferences.ListPreferenceEx) {
-				((net.osmand.plus.settings.preferences.ListPreferenceEx) pref).setValue(value);
+			if (pref instanceof ListPreferenceEx) {
+				((ListPreferenceEx) pref).setValue(value);
 			}
 		}
 

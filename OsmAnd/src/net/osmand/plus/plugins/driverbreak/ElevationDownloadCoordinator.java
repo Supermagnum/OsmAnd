@@ -21,6 +21,7 @@ import android.os.AsyncTask;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.fragment.app.FragmentActivity;
 import androidx.fragment.app.FragmentManager;
 
 import net.osmand.Location;
@@ -32,6 +33,7 @@ import net.osmand.plus.R;
 import net.osmand.plus.activities.MapActivity;
 import net.osmand.plus.routing.RouteCalculationResult;
 import net.osmand.plus.settings.backend.ApplicationMode;
+import net.osmand.plus.utils.AndroidUtils;
 import net.osmand.router.RouteSegmentResult;
 import net.osmand.util.Algorithms;
 
@@ -92,16 +94,38 @@ public class ElevationDownloadCoordinator {
 			}
 			firstEnableCheckScheduled = true;
 		}
+		if (!(activity instanceof FragmentActivity)) {
+			settings.setElevationFirstEnablePromptDoneSync(true);
+			return;
+		}
+		promptDownloadForLocation((FragmentActivity) activity, true, false);
+	}
+
+	/**
+	 * User-initiated download from plugin settings (county or country at map position).
+	 */
+	public void promptDownloadForCurrentRegion(@NonNull FragmentActivity activity) {
+		promptDownloadForLocation(activity, false, true);
+	}
+
+	private void promptDownloadForLocation(@NonNull FragmentActivity activity, boolean firstEnablePrompt,
+			boolean ignoreDeclinedRegions) {
 		LatLon location = resolveCurrentLocation();
 		if (location == null) {
-			settings.setElevationFirstEnablePromptDoneSync(true);
+			app.showToastMessage(R.string.driver_break_elevation_region_unknown);
+			if (firstEnablePrompt) {
+				settings.setElevationFirstEnablePromptDoneSync(true);
+			}
 			return;
 		}
 		OsmAndTaskManager.executeTask(new AsyncTask<Void, Void, ElevationCoverageHelper.RegionMissingTiles>() {
 			@Override
 			protected ElevationCoverageHelper.RegionMissingTiles doInBackground(Void... voids) {
 				ElevationAdministrativeRegion region = ElevationRegionResolver.resolveAt(app, location);
-				if (region == null || settings.isElevationRegionDeclinedSync(region.getRegionId())) {
+				if (region == null) {
+					return null;
+				}
+				if (!ignoreDeclinedRegions && settings.isElevationRegionDeclinedSync(region.getRegionId())) {
 					return null;
 				}
 				return ElevationCoverageHelper.missingTilesForRegion(elevationProvider, region);
@@ -109,17 +133,76 @@ public class ElevationDownloadCoordinator {
 
 			@Override
 			protected void onPostExecute(ElevationCoverageHelper.RegionMissingTiles result) {
-				if (result == null || result.getMissingTileCount() == 0) {
-					settings.setElevationFirstEnablePromptDoneSync(true);
+				if (result == null) {
+					if (firstEnablePrompt) {
+						settings.setElevationFirstEnablePromptDoneSync(true);
+						firstEnableCheckScheduled = false;
+					} else {
+						app.showToastMessage(R.string.driver_break_elevation_region_unknown);
+					}
 					return;
 				}
-				if (showPrompt(activity, result, true)) {
-					settings.setElevationFirstEnablePromptDoneSync(true);
-				} else {
+				if (result.getMissingTileCount() == 0) {
+					app.showToastMessage(formatCompleteMessage(result));
+					if (firstEnablePrompt) {
+						settings.setElevationFirstEnablePromptDoneSync(true);
+					}
+					return;
+				}
+				if (showPrompt(activity, result, firstEnablePrompt)) {
+					if (firstEnablePrompt) {
+						settings.setElevationFirstEnablePromptDoneSync(true);
+					}
+				} else if (firstEnablePrompt) {
 					firstEnableCheckScheduled = false;
 				}
 			}
 		}, backgroundExecutor);
+	}
+
+	/**
+	 * Updates the elevation settings summary with county/country name and missing tile count.
+	 */
+	public void refreshRegionSummary(@NonNull FragmentActivity activity,
+			@NonNull RegionSummaryCallback callback) {
+		LatLon location = resolveCurrentLocation();
+		if (location == null) {
+			activity.runOnUiThread(() -> callback.onRegionSummary(
+					app.getString(R.string.driver_break_elevation_region_unknown), 0));
+			return;
+		}
+		OsmAndTaskManager.executeTask(new AsyncTask<Void, Void, ElevationCoverageHelper.RegionMissingTiles>() {
+			@Override
+			protected ElevationCoverageHelper.RegionMissingTiles doInBackground(Void... voids) {
+				ElevationAdministrativeRegion region = ElevationRegionResolver.resolveAt(app, location);
+				if (region == null) {
+					return null;
+				}
+				return ElevationCoverageHelper.missingTilesForRegion(elevationProvider, region);
+			}
+
+			@Override
+			protected void onPostExecute(ElevationCoverageHelper.RegionMissingTiles result) {
+				if (result == null) {
+					callback.onRegionSummary(app.getString(R.string.driver_break_elevation_region_unknown), 0);
+					return;
+				}
+				String placeName = result.region.getDisplayName();
+				if (!Algorithms.isEmpty(result.region.getCountryDisplayName())) {
+					placeName = app.getString(R.string.driver_break_elevation_region_with_country, placeName,
+							result.region.getCountryDisplayName());
+				}
+				int missing = result.getMissingTileCount();
+				String summary = missing == 0
+						? app.getString(R.string.driver_break_elevation_region_complete, placeName)
+						: app.getString(R.string.driver_break_elevation_region_summary_value, placeName, missing);
+				callback.onRegionSummary(summary, missing);
+			}
+		}, backgroundExecutor);
+	}
+
+	public interface RegionSummaryCallback {
+		void onRegionSummary(@NonNull String summary, int missingTileCount);
 	}
 
 	/**
@@ -154,7 +237,11 @@ public class ElevationDownloadCoordinator {
 				if (result == null) {
 					return;
 				}
-				showPrompt(activity, result, false);
+				FragmentActivity host = mapActivity;
+				if (host == null) {
+					return;
+				}
+				showPrompt(host, result, false);
 			}
 		}, backgroundExecutor);
 	}
@@ -175,21 +262,31 @@ public class ElevationDownloadCoordinator {
 		settings.getDbExecutor().execute(() -> settings.addElevationDeclinedRegionSync(regionId));
 	}
 
-	private boolean showPrompt(@NonNull Activity activity, @NonNull ElevationCoverageHelper.RegionMissingTiles missing,
-			boolean firstEnablePrompt) {
+	private boolean showPrompt(@NonNull FragmentActivity activity,
+			@NonNull ElevationCoverageHelper.RegionMissingTiles missing, boolean firstEnablePrompt) {
 		String regionId = missing.region.getRegionId();
 		pendingDownloads.put(regionId, missing);
-		MapActivity mapActivity = activity instanceof MapActivity ? (MapActivity) activity : this.mapActivity;
-		if (mapActivity == null) {
+		sessionPromptedRegionIds.add(regionId);
+		FragmentManager fm = activity.getSupportFragmentManager();
+		if (!AndroidUtils.isFragmentCanBeAdded(fm, ElevationDownloadPromptBottomSheet.TAG)) {
 			return false;
 		}
-		sessionPromptedRegionIds.add(regionId);
-		FragmentManager fm = mapActivity.getSupportFragmentManager();
 		String message = formatPromptMessage(missing);
 		ApplicationMode appMode = app.getSettings().getApplicationMode();
-		ElevationDownloadPromptBottomSheet.showInstance(fm, appMode, true, regionId, message,
-				missing.getMissingTileCount(), firstEnablePrompt);
+		ElevationDownloadPromptBottomSheet.showInstance(fm, appMode, activity instanceof MapActivity, regionId,
+				message, missing.getMissingTileCount(), firstEnablePrompt);
 		return true;
+	}
+
+	@NonNull
+	private String formatCompleteMessage(@NonNull ElevationCoverageHelper.RegionMissingTiles missing) {
+		ElevationAdministrativeRegion region = missing.region;
+		String placeName = region.getDisplayName();
+		if (!Algorithms.isEmpty(region.getCountryDisplayName())) {
+			placeName = app.getString(R.string.driver_break_elevation_region_with_country, placeName,
+					region.getCountryDisplayName());
+		}
+		return app.getString(R.string.driver_break_elevation_region_complete, placeName);
 	}
 
 	@NonNull
@@ -210,9 +307,12 @@ public class ElevationDownloadCoordinator {
 		if (location != null) {
 			return new LatLon(location.getLatitude(), location.getLongitude());
 		}
-		MapActivity activity = mapActivity;
-		if (activity != null) {
+		if (app.getOsmandMap() != null && app.getOsmandMap().getMapView() != null) {
 			return app.getOsmandMap().getMapView().getCurrentRotatedTileBox().getCenterLatLon();
+		}
+		MapActivity activity = mapActivity;
+		if (activity != null && activity.getMapView() != null) {
+			return activity.getMapView().getCurrentRotatedTileBox().getCenterLatLon();
 		}
 		return null;
 	}
